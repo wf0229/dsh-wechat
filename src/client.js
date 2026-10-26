@@ -879,7 +879,7 @@ window.__ModuleLoader__.load({
 							id: "delivery",
 							title: "消息推送",
 							summary: deliverySummary,
-							desc: "决定微信里出现多少内容、什么时候出现。想安静一点，先关「静默」不够就开「结论模式」。`/status` 的详细程度也在这一组。",
+							desc: "决定微信里出现多少内容、什么时候出现。想安静一点，先开「静默」，还嫌吵再开「结论模式」。`/status` 的详细程度也在这一组。",
 							open: isOpen("delivery"),
 							onToggle: toggleGroup,
 						},

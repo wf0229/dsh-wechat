@@ -581,10 +581,12 @@ function resolveMistypedCommand(
   text: string,
 ): { ref: LocalCommandRef; gluedRest?: string; misspelledName?: boolean; shown: string } | null {
   if (!text) return null;
-  // A line that parses is by definition not mistyped. `/at` is checked on the
-  // ATTEMPT (see `isAtCommandAttempt`), because its own branch answers with
-  // its usage rather than forwarding.
-  if (recognizesLocalCommand(text) || isAtCommandAttempt(text)) return null;
+  // A line that parses is by definition not mistyped. `/at` and `/skill` are
+  // checked on the ATTEMPT (see `isAtCommandAttempt` / `isSkillCommandAttempt`),
+  // because their own branches answer with usage rather than forwarding.
+  if (recognizesLocalCommand(text) || isAtCommandAttempt(text) || isSkillCommandAttempt(text)) {
+    return null;
+  }
   const trimmed = text.trim();
   const m = trimmed.match(/^\/([A-Za-z][A-Za-z0-9-]*)/);
   if (!m) return null;
@@ -641,7 +643,8 @@ function recognizesLocalCommand(text: string): boolean {
     parseReasoningCommand(text) !== null ||
     parseEnterCommand(text) !== null ||
     parseHistoryCommand(text) !== null ||
-    parseAtCommand(text) !== null
+    parseAtCommand(text) !== null ||
+    parseSkillCommand(text) !== null
   );
 }
 
@@ -1210,6 +1213,56 @@ export function isHistoryCommandAttempt(text: string): boolean {
   return /^\s*\/history\b/i.test(text);
 }
 
+// ─── /skill: 查看当前会话的技能 ──────────────────────────────────────────────
+
+/**
+ * `/skill`（技能）— 列出当前会话的技能，或看某一个的详细说明。
+ *
+ *   /skill        → 列出技能（编号 + 一句话说明）
+ *   /skill 2      → 第 2 个的详细说明
+ *   /skill office → 按名字看某个技能的详细说明
+ *
+ * **它不执行技能。** 执行技能的方式是直接把 `/技能名` 发出去：宿主
+ * `dsh-tool-skill` 会扫描用户消息里的 `/名称` 手势并注入技能正文，与 GUI 里
+ * 在输入框打 `/技能名` 完全同一条路。所以 `/skill` 只负责「让你知道有哪些、
+ * 分别是什么」，执行交给那条本来就存在的通道。
+ *
+ * 由此产生的一个边界：技能名如果与 bridge 自己的命令同名（`/help`、`/status`
+ * 之类），直接打 `/名字` 会被当成命令而不是手势。这时用 `/raw on` 透传即可
+ * ——`/raw` 期间所有拦截全部让开，`/名字` 原样交给 agent，宿主的扫描照常生效。
+ * 列表里会提示这一点。
+ */
+export type SkillCommand = { kind: "list" } | { kind: "show"; target: string };
+
+/**
+ * 目标：编号（正整数）或技能名（kebab-case ASCII，宿主 `isSkillName` 的语法）。
+ *
+ * 与 `/at` 不同，这里**没有**「目标 + 任务」的形式：`/skill` 不转发任何东西，
+ * 所以整行只能是这两者之一。`/skill 1 帮我做这个事` 会被判为解析失败并回用法，
+ * 而不是把后半句丢掉——静默丢字比回一句提示糟得多。
+ */
+const SKILL_TARGET = /^(\d+|[a-z0-9]+(?:-[a-z0-9]+)*)$/i;
+
+export function parseSkillCommand(text: string): SkillCommand | null {
+  const m = text.trim().match(/^\/skill(?:\s+([\s\S]*))?$/i);
+  if (!m) return null;
+  const rest = (m[1] ?? "").trim();
+  if (!rest) return { kind: "list" };
+  if (/^(?:list|ls)$/i.test(rest)) return { kind: "list" };
+  const target = rest.match(SKILL_TARGET);
+  return target ? { kind: "show", target: target[1]! } : null;
+}
+
+/**
+ * True if text looks like an `/skill` attempt (including an invalid argument).
+ *
+ * Same contract as {@link isHistoryCommandAttempt}: a mistyped line gets its
+ * usage reply instead of being forwarded as prose.
+ */
+export function isSkillCommandAttempt(text: string): boolean {
+  return /^\s*\/skill\b/i.test(text);
+}
+
 /**
  * True if `text` is a recognized slash command that should BYPASS any
  * pending question/approval card and execute normally.
@@ -1264,6 +1317,9 @@ export function isBypassSlashCommand(text: string): boolean {
     // card's own semantics untouched. `/history` keeps the stricter
     // valid-parse rule it has always had.
     isAtCommandAttempt(text) ||
+    // `/skill` follows the same attempt rule: a mistyped argument must reach
+    // `handleMessage` for its usage reply, never be submitted as a card answer.
+    isSkillCommandAttempt(text) ||
     // A mistyped line for a command this bridge owns (`/s lsit`,
     // `/workspacelist`) is still a command attempt, not a free-text answer: it
     // must reach `handleMessage` to get its usage reply instead of being
@@ -1321,6 +1377,7 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "f",
   "history",
   "at",
+  "skill",
   "rp",
   "reject-permission",
   "rq",

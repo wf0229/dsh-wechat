@@ -479,6 +479,24 @@ const COMMANDS: HelpCommandEntry[] = [
     ],
   },
 
+  {
+    id: "skill",
+    command: "/skill",
+    aliases: [],
+    summary: "查看当前会话的技能",
+    // No `subcommands`: `/skill` 的语法是「什么都不带」或「一个编号/名字」，
+    // 没有子命令表。`list` 与裸 `/skill` 等价，不值得多占一行。
+    usage: "/skill [编号或技能名]",
+    subcommands: [],
+    group: "reference",
+    examples: [
+      { line: "/skill", note: "列出技能（编号 + 一句话说明）" },
+      { line: "/skill list", note: "同上" },
+      { line: "/skill 2", note: "看第 2 个的详细说明" },
+      { line: "/skill office", note: "按名字看详细说明" },
+    ],
+  },
+
   // ── 卡片 ────────────────────────────────────────────────────────────────
   {
     id: "rq",

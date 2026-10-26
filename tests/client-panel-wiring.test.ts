@@ -71,6 +71,18 @@ describe("settings panel ↔ host config wiring", () => {
     expect(client).toContain("/final on|off");
   });
 
+  it("describes 静默 as something you turn ON to quieten things down", () => {
+    // Both switches are opt-in: `/silent` and `/final` each get quieter when
+    // switched ON, and 结论模式 is the stronger of the two. The group blurb
+    // once said 「先关『静默』」 — the opposite of what the switch does, which
+    // sends a user hunting for a toggle that makes the bot LOUDER.
+    const blurb = client.split("\n").find((line) => line.includes("决定微信里出现多少内容"));
+    expect(blurb, "the 消息推送 group blurb must still exist").toBeDefined();
+    expect(blurb).toContain("先开「静默」");
+    expect(blurb).toContain("结论模式");
+    expect(blurb).not.toContain("先关");
+  });
+
   it("the 打字合并 control points at the WeChat-side switch", () => {
     expect(client).toContain("打字合并");
     expect(client).toContain("/merge on|off");

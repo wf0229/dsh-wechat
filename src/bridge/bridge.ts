@@ -37,7 +37,7 @@ import { formatQuestionForWeChat, parseQuestionReply, buildAnswer } from "../ada
 import { formatApprovalCard, parseApprovalReply } from "../adapter/approval-format.js";
 import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
-import type { ModelSelection, PinOutcome, SessionHeader, SessionRecord } from "../dsh/ops.js";
+import type { ModelSelection, PinOutcome, SessionHeader, SessionRecord, SkillEntry } from "../dsh/ops.js";
 import type { Agent, AgentSessionLike, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
 import { sessionEvents } from "../dsh/types.js";
 import {
@@ -60,10 +60,12 @@ import {
   isAtCommandAttempt,
   isBypassSlashCommand,
   isHistoryCommandAttempt,
+  isSkillCommandAttempt,
   parseAtCommand,
   parseCommandName,
   parseHelpCommand,
   parseHistoryCommand,
+  parseSkillCommand,
   renderBackgroundJobsSection,
   renderProjectionSection,
   parseEnterCommand,
@@ -107,6 +109,7 @@ import {
   type PresetCommand,
   type ReasoningCommand,
   type SessionCommand,
+  type SkillCommand,
   type WorkspaceCommand,
 } from "./slash.js";
 import {
@@ -117,6 +120,13 @@ import {
   normalizeAtTarget,
   type StagedReference,
 } from "./at-refs.js";
+import {
+  formatSkillAmbiguous,
+  formatSkillDetail,
+  formatSkillList,
+  matchSkillTarget,
+  type SkillMatch,
+} from "./skill-catalog.js";
 
 /** WeChat gateway continuous-message limit per user interaction window. */
 const MSG_LIMIT_MAX = 10;
@@ -250,6 +260,15 @@ const AT_FILE_LIMIT = 8;
  * abandoned `/at` cannot ambush an unrelated message an hour later.
  */
 const AT_TTL_MS = 10 * 60_000;
+
+/**
+ * Budget for one host skill read (the catalog listing).
+ *
+ * A provider that never settles would otherwise leave `/skill` with no reply at
+ * all — the user sees a silent bot and has no way to tell it apart from a
+ * dropped message. Timing out degrades to a visible answer instead.
+ */
+const SKILL_READ_TIMEOUT_MS = 10_000;
 
 /**
  * Host `approval/request` waterfall payload (structural). `agent.id` is the
@@ -2094,6 +2113,22 @@ export class WeChatDSHBridge {
         await this.sendReply(
           userId,
           `⚠️ 用法: /history [all] [数量]（1-${HISTORY_MAX}，默认 5）例如 /history 10 或 /history all。这条消息没有转发给 agent。`,
+        );
+        return;
+      }
+      // `/skill` is matched on the ATTEMPT for the same reason as `/at`: a
+      // mistyped line gets the usage reply, never a forwarded sentence.
+      const skillCmd = parseSkillCommand(text);
+      if (skillCmd) {
+        await this.handleSkillCommand(userId, skillCmd);
+        return;
+      }
+      if (isSkillCommandAttempt(text)) {
+        await this.sendReply(
+          userId,
+          "⚠️ 用法: /skill [编号或技能名]\n"
+          + "发 /skill 看技能一览，发 /skill 2 看第 2 个的详细说明。"
+          + "执行技能请直接发 /技能名（例如 /office 做事）。这条消息没有转发给 agent。",
         );
         return;
       }
@@ -5508,6 +5543,92 @@ export class WeChatDSHBridge {
       case "file":
         await this.stageFileRef(userId, user, cmd.target);
         return;
+    }
+  }
+
+  // ─── /skill ───────────────────────────────────────────────────────────────
+
+  /**
+   * `/skill` — 列出当前会话的技能，或看某一个的详细说明。
+   *
+   * **不执行技能**：执行是把 `/技能名` 直接发出去，由宿主
+   * `@deepseek-ai/dsh-tool-skill` 的 `agent/pre-step` 扫描用户文本、自己注入
+   * 技能正文——和 GUI 里在输入框打 `/技能名` 同一条路。所以这里没有任何暂存、
+   * 一次性状态或注入逻辑，只有两次只读查询。
+   *
+   * 技能目录**不跨轮缓存**：技能是文件，用户随时可能新增或改掉一个，而缓存一份
+   * 过期编号表正是 `/skill 3` 指错技能的原因。代价是每次列表要读一次目录——
+   * 那是本地文件扫描，比让用户对着错编号猜要便宜。
+   */
+  private async handleSkillCommand(userId: string, cmd: SkillCommand): Promise<void> {
+    const user = this.ensureBoundUser(userId);
+    if (!this.ops.skills() && !this.ops.sessionSkillCatalog()) {
+      await this.sendReply(
+        userId,
+        "⚠️ 当前 DSH 未挂载技能服务（dsh-skill），无法列出技能。",
+      );
+      return;
+    }
+    const entries = await this.listSessionSkills(user);
+    if (cmd.kind === "list") {
+      await this.sendReply(userId, formatSkillList(entries));
+      return;
+    }
+    const match = matchSkillTarget(entries, cmd.target);
+    const problem = this.skillMatchProblem(match, cmd.target, entries.length);
+    if (problem) {
+      await this.sendReply(userId, problem);
+      return;
+    }
+    if (match.kind !== "one") return;
+    await this.sendReply(userId, formatSkillDetail(match.entry, { position: match.index }));
+  }
+
+  /**
+   * The skills visible to the bound session.
+   *
+   * Applies the user-invocation policy here because `ctx.skills.list` does not:
+   * a skill marked `userInvocable: false` is model-only and must not be offered
+   * as something the user can run. The session catalog already filters, and its
+   * flat `modelInvocable` says nothing about user invocation, so the two shapes
+   * are read differently on purpose (see `SkillEntry`).
+   */
+  private async listSessionSkills(user: UserState): Promise<readonly SkillEntry[]> {
+    const agent = this.agents.get(user);
+    const entries = await this.ops.sessionSkills(user.sessionId, {
+      cwd: user.cwd,
+      ...(agent ? { agent } : {}),
+      // Bound the read: a stuck provider must not swallow the user's command
+      // with no reply at all. Timing out degrades to a visible answer.
+      signal: AbortSignal.timeout(SKILL_READ_TIMEOUT_MS),
+    });
+    return entries.filter((entry) => entry.invocation?.userInvocable !== false);
+  }
+
+  /**
+   * The reply for a target that did not resolve, or `null` when it did.
+   *
+   * An out-of-range NUMBER is not the same mistake as an unknown NAME, and the
+   * difference matters: a stale number means the list changed under the user
+   * (they should just re-read it), while an unknown name is usually a typo of
+   * something that IS there.
+   */
+  private skillMatchProblem(
+    match: SkillMatch,
+    target: string,
+    total: number,
+  ): string | null {
+    switch (match.kind) {
+      case "one":
+        return null;
+      case "ambiguous":
+        return formatSkillAmbiguous(target, match.candidates);
+      case "out-of-range":
+        return total === 0
+          ? "⚠️ 当前会话没有可用技能，发送 /skill 查看。"
+          : `⚠️ 编号 ${target} 超出范围（当前 ${total} 个，编号 1-${total}）。发送 /skill 查看。`;
+      case "none":
+        return `⚠️ 没有名为「${target}」的技能。发送 /skill 查看当前会话可用的技能。`;
     }
   }
 

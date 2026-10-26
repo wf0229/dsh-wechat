@@ -346,6 +346,68 @@ export interface FileReferencesService {
   ): Promise<readonly FileReferenceCandidate[]>;
 }
 
+/**
+ * One skill as the host reports it. Only the fields `/skill` renders are
+ * declared: the registry returns more (`provider`, `source`, `rank`) and this
+ * bridge must not depend on any of them.
+ *
+ * `whenToUse` is deliberately NOT declared even though `SkillSummary` has it:
+ * no skill in practice sets it (every SKILL.md here carries only `name` and
+ * `description`), so rendering it would be a branch nothing ever reaches.
+ *
+ * Two host services report invocation policy in two different shapes, so both
+ * are declared rather than one being assumed: `ctx.skills.list` nests it under
+ * `invocation`, while `ctx.sessionSkillCatalog.list` returns a flat
+ * `modelInvocable` (it only ever yields skills a user may invoke, so it has no
+ * user flag to report).
+ */
+export interface SkillEntry {
+  readonly name: string;
+  readonly description: string;
+  /** Absolute path of the skill file, when the provider knows one. */
+  readonly path?: string;
+  /** Invocation policy, as `ctx.skills.list` reports it. */
+  readonly invocation?: {
+    readonly modelInvocable?: boolean;
+    readonly userInvocable?: boolean;
+  };
+  /** Invocation policy, as `ctx.sessionSkillCatalog.list` reports it. */
+  readonly modelInvocable?: boolean;
+}
+
+/**
+ * Minimal structural surface of `ctx.skills` (`@deepseek-ai/dsh-skill`), used
+ * only for its `list` read.
+ *
+ * `/skill` never loads a body: executing a skill is the host's job, triggered
+ * by writing `/技能名` into the message (see `parseSkillCommand`). So this
+ * declares `list` alone — a `get` here would only invite the bridge to start
+ * rendering `<skill_content>` itself again.
+ *
+ * `scope` is the host's `ScopeKey` (`object`); the bridge passes the bound
+ * agent so the read merges that preset's layers.
+ */
+export interface SkillsService {
+  list(options?: {
+    readonly cwd?: string;
+    readonly scope?: object;
+    readonly signal?: AbortSignal;
+  }): Promise<readonly SkillEntry[]>;
+}
+
+/**
+ * Minimal structural surface of `ctx.sessionSkillCatalog`: the service behind
+ * the GUI's `/` skill completion. Preferred over `ctx.skills` because it
+ * resolves the session's cwd AND preset from the durable session record, so it
+ * answers for a cold session without resuming an agent.
+ */
+export interface SessionSkillCatalogService {
+  list(
+    request: { readonly sessionId: string },
+    signal: AbortSignal,
+  ): Promise<{ readonly skills: readonly SkillEntry[] }>;
+}
+
 /** Approximate context occupancy (dsh-token-meter `contextPressure` projection). */
 export interface ContextPressureProjection {
   /** Provider-reported prompt tokens of the most recent request. */
@@ -1202,6 +1264,68 @@ export class DshOps {
    */
   fileReferences(): FileReferencesService | undefined {
     return this.get<FileReferencesService>("fileReferences");
+  }
+
+  // ─── Skills (`/skill`) ───
+
+  /**
+   * The `ctx.skills` registry, or `undefined` when the host composes no skill
+   * support. Its absence is a hard "this host has no skills" — `/skill` says so
+   * plainly instead of pretending the session has none.
+   */
+  skills(): SkillsService | undefined {
+    return this.get<SkillsService>("skills");
+  }
+
+  /**
+   * The `ctx.sessionSkillCatalog` service, or `undefined` on hosts that do not
+   * expose the skill Remote.
+   */
+  sessionSkillCatalog(): SessionSkillCatalogService | undefined {
+    return this.get<SessionSkillCatalogService>("sessionSkillCatalog");
+  }
+
+  /**
+   * The skills visible to one session.
+   *
+   * Two paths, in order, because they answer slightly different questions:
+   *
+   *   1. `ctx.sessionSkillCatalog.list({sessionId})` — the exact view the GUI's
+   *      `/` completion shows for that session (its cwd AND preset decide the
+   *      layers), and it never activates a cold agent. Listing skills must not
+   *      resume a session.
+   *   2. `ctx.skills.list({cwd, scope})` — the same registry read directly,
+   *      used when the catalog service is absent (older hosts) or when the
+   *      session cannot be inspected.
+   *
+   * Never throws: a failing provider is logged and treated as "no skills", so
+   * `/skill` still answers instead of raising.
+   */
+  async sessionSkills(
+    sessionId: string | undefined,
+    options: { cwd?: string; agent?: Agent; signal?: AbortSignal } = {},
+  ): Promise<readonly SkillEntry[]> {
+    const catalog = this.get<SessionSkillCatalogService>("sessionSkillCatalog");
+    if (catalog && sessionId) {
+      try {
+        const value = await catalog.list({ sessionId }, options.signal ?? new AbortController().signal);
+        if (Array.isArray(value?.skills)) return value.skills;
+      } catch (err) {
+        console.warn(`[dsh-wechat] sessionSkillCatalog.list failed: ${String(err)}`);
+      }
+    }
+    const registry = this.skills();
+    if (!registry) return [];
+    try {
+      return await registry.list({
+        ...(options.cwd ? { cwd: options.cwd } : {}),
+        ...(options.agent ? { scope: options.agent } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (err) {
+      console.warn(`[dsh-wechat] skills.list failed: ${String(err)}`);
+      return [];
+    }
   }
 
   // ─── Helpers for cross-session notification recipients ───

@@ -31,6 +31,8 @@ const client = readFileSync(fileURLToPath(new URL("../src/client.js", import.met
 const RENDERED_TOGGLES = [
   "crossSessionNotify",
   "notifyTaskEvents",
+  // 完成提醒带全文还是摘要 (gated by notifyTaskEvents, default摘要).
+  "notifyTaskFullReply",
   "silent",
   "finalOnly",
   "surfacePromptEnabled",
@@ -275,6 +277,57 @@ describe("settings panel grouping", () => {
     expect(client.match(/disabled: !form\?\.mediaMergeEnabled/g)?.length).toBe(1);
     expect(client).not.toContain("disabled: !form?.mediaAtRefEnabled");
     expect(client).toContain("mediaSummary");
+  });
+
+  it("the 完整显示任务完成回复 switch is inert until 跨会话任务完成提醒 is on", () => {
+    // Same rule as the merge parameters: disabled, never hidden. Its own
+    // render path decides nothing while the notice gate is off, so leaving it
+    // clickable would advertise a switch that currently does nothing.
+    expect(client).toContain("disabled: !form?.notifyTaskEvents");
+    // It must live in the delivery group, right with the gate it depends on.
+    const deliveryStart = client.indexOf('id: "delivery"');
+    const mergeStart = client.indexOf('id: "merge"');
+    const delivery = client.slice(deliveryStart, mergeStart);
+    expect(delivery).toContain("form?.notifyTaskEvents");
+    expect(delivery).toContain("form?.notifyTaskFullReply");
+    // The collapsed summary must show the choice, or the setting disappears
+    // the moment the group is closed.
+    expect(client).toContain('? "全文" : "摘要"');
+  });
+
+  it("attaches the 完整显示 switch to its parent toggle in the SAME grid cell", () => {
+    // The delivery toggles are a TWO-COLUMN grid filled row by row. Two ways to
+    // get this wrong, and both were shipped before the screenshot caught them:
+    //
+    //   1. a bare sibling cell      → it lands left, a row below the parent;
+    //   2. `grid-column:1 / -1`     → it spans the row, but STILL starts on the
+    //                                 next line, so it reads as a child of the
+    //                                 left-hand neighbour instead.
+    //
+    // The only shape that keeps it under «跨会话任务完成提醒» is one wrapper
+    // `.wx_cell` containing BOTH the parent label and the `.wx_dep` block, so
+    // the pair occupies a single grid cell.
+    const cellAt = client.indexOf('className: "wx_cell"');
+    const parentAt = client.indexOf("checked: !!form?.notifyTaskEvents");
+    const depAt = client.indexOf('className: "wx_dep"');
+    const fullAt = client.indexOf("checked: !!form?.notifyTaskFullReply");
+    expect(cellAt).toBeGreaterThan(-1);
+    // Order inside the cell: wrapper → parent label → dep block → child input.
+    expect(parentAt).toBeGreaterThan(cellAt);
+    expect(depAt).toBeGreaterThan(parentAt);
+    expect(fullAt).toBeGreaterThan(depAt);
+    // The wrapper must close AFTER the dependent switch, or the child escapes
+    // its cell again (slice runs to the next toggle that follows the pair).
+    const silentAt = client.indexOf("checked: !!form?.silent");
+    expect(silentAt).toBeGreaterThan(fullAt);
+    const cellSource = client.slice(cellAt, silentAt);
+    expect(cellSource).toContain("checked: !!form?.notifyTaskFullReply");
+    // The span-the-whole-row hack must be GONE — it was the actual bug.
+    expect(client).not.toContain(".wx_dep{grid-column:1 / -1;");
+    expect(client).toContain(".wx_cell{display:flex;flex-direction:column;min-width:0}");
+    // The dependency has to be stated in the UI, not only in the tooltip: a
+    // greyed-out box with no explanation reads as a bug.
+    expect(client).toContain("仅在「跨会话任务完成提醒」开启时生效");
   });
 
   it("remembers which groups are expanded, without requiring storage", () => {

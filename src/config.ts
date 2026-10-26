@@ -29,6 +29,23 @@ export interface WeChatDSHConfig {
    */
   notifyTaskEvents: boolean;
   /**
+   * 完整显示跨会话任务完成提醒：quote the WHOLE assistant message in a
+   * cross-session completion notice instead of the 80-character tail.
+   *
+   * Only meaningful while {@link notifyTaskEvents} is on — it decides how much
+   * of the finished session's answer is shown, never whether a notice is sent
+   * at all. Default `false`, i.e. the historical one-glance card: a phone
+   * reader usually wants "done, and here is the gist", and one long answer
+   * pushes the next notice off the screen (WeChat's rolling 10-message window
+   * is shared with ordinary replies). Turn it on when the notice IS the
+   * deliverable — a background session's conclusion is the thing you asked
+   * for and switching into that session to read it is the extra step.
+   *
+   * Both spellings go through the same masking as before (the full body is an
+   * excerpt, not a reply), so secrets the model was shown stay masked.
+   */
+  notifyTaskFullReply: boolean;
+  /**
    * Silent mode: only send the final text of each turn. Global, survives
    * re-scan (which clears per-user `state.json`). Default off.
    */
@@ -252,6 +269,9 @@ export function defaultConfig(): WeChatDSHConfig {
     cardTimeoutMs: 30 * 60_000,
     crossSessionNotify: false,
     notifyTaskEvents: false,
+    // The notice stays a one-glance card by default; the full answer is opt-in
+    // (`notifyTaskFullReply`).
+    notifyTaskFullReply: false,
     silent: false,
     finalOnly: false,
     finalOnlyIdleMs: 45_000,

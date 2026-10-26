@@ -732,6 +732,158 @@ describe("cross-session completion preview", () => {
   });
 });
 
+/**
+ * `notifyTaskFullReply` — how MUCH of the finished answer the notice carries.
+ *
+ * The default is the 80-character tail: one glanceable card. With the switch
+ * on, the whole answer travels with the notice — including the middle the tail
+ * excerpt deliberately drops, and including content a 400-char answer would
+ * otherwise lose entirely.
+ */
+describe("notifyTaskFullReply — full answer vs tail summary", () => {
+  const HEAD = "开头：我先把缓存层的读写路径看了一遍。";
+  const MIDDLE = "中间：找到两处键没经过序列化就直接拼进 URL。";
+  const TAIL = "结论：两处都改成 URLSearchParams，测试全绿。";
+  // Must exceed PREVIEW_CHARS (80) or the "tail" IS the whole message and the
+  // default case proves nothing about truncation. FILLER also pushes MIDDLE
+  // outside the tail window, so its absence in the default notice is a real
+  // assertion rather than a coincidence.
+  const FILLER = "顺手把相关的空值和编码分支也补了测试。".repeat(5);
+  const longText = `${HEAD}${MIDDLE}${FILLER}${TAIL}`;
+
+  function enableFull(bridge: any): any {
+    bridge.config.notifyTaskFullReply = true;
+    return bridge;
+  }
+
+  /** Drive one assistant message + turn/end and return the completion notice. */
+  async function noticeFor(bridge: any, text: string): Promise<string> {
+    bridge.handleSessionEvent("sess-B", {
+      type: "assistant/message",
+      time: Date.now(),
+      data: { message: { content: [{ type: "text", text }] } },
+    });
+    bridge.handleSessionEvent("sess-B", { type: "turn/end", time: Date.now(), data: {} });
+    await flushTicks();
+    await new Promise((r) => setTimeout(r, 10));
+    const notices = sendTextMessage.mock.calls
+      .map((c: any) => c[1] as string)
+      .filter((t: string) => t.includes("任务已完成"));
+    expect(notices).toHaveLength(1);
+    return notices[0]!;
+  }
+
+  it("defaults off, so an untouched install keeps the 80-char tail", async () => {
+    // The upgrade contract: a new key must not change what existing installs
+    // send. `defaultConfig()` is the authority the panel and the composition
+    // row both resolve against.
+    expect(defaultConfig().notifyTaskFullReply).toBe(false);
+    const bridge = makeBridgeWithConfig(false, true);
+    expect(bridge.config.notifyTaskFullReply).toBe(false);
+    const notice = await noticeFor(bridge, longText);
+    expect(notice).toContain(TAIL);
+    expect(notice).not.toContain(HEAD);
+    expect(notice).not.toContain(MIDDLE);
+  });
+
+  it("on: the whole answer is in the notice, head and middle included", async () => {
+    const bridge = enableFull(makeBridgeWithConfig(false, true));
+    const notice = await noticeFor(bridge, longText);
+    expect(notice).toContain(HEAD);
+    expect(notice).toContain(MIDDLE);
+    expect(notice).toContain(TAIL);
+    // Still a completion notice: the session label and the pointer survive.
+    expect(notice).toContain("📂");
+    expect(notice).toContain("✅ 任务已完成");
+    expect(notice).toContain("/session switch");
+  });
+
+  it("on: a 2000-char answer is carried whole, not truncated to the tail", async () => {
+    const bridge = enableFull(makeBridgeWithConfig(false, true));
+    const long = `起点标记${"中间内容".repeat(300)}终点标记`;
+    const notice = await noticeFor(bridge, long);
+    expect(notice).toContain("起点标记");
+    expect(notice).toContain("终点标记");
+  });
+
+  it("on: commit SHAs and digests in a real answer survive (no over-masking)", async () => {
+    // `maskSecrets`' generic hex/base64 rules exist for snippets; applied to a
+    // whole answer they would replace every SHA. The full-reply path therefore
+    // masks with `maskCredentials`.
+    const bridge = enableFull(makeBridgeWithConfig(false, true));
+    const sha = "3f2a9c1d8b7e6f5a4c3b2d1e0f9a8b7c6d5e4f3a";
+    const notice = await noticeFor(bridge, `修复已完成，commit ${sha} 已提交。`);
+    expect(notice).toContain(sha);
+  });
+
+  it("on: a real credential in the answer is still masked", async () => {
+    const bridge = enableFull(makeBridgeWithConfig(false, true));
+    const notice = await noticeFor(
+      bridge,
+      `配置里那行是 Authorization: Bearer abcDEF1234567890 ，记得换掉。`,
+    );
+    expect(notice).toContain("Bearer ***");
+    expect(notice).not.toContain("abcDEF1234567890");
+  });
+
+  it("off: the switch cannot resurrect a disabled notice gate", async () => {
+    // `notifyTaskFullReply` is presentation only: with the task gate off it
+    // must produce no notice at all, in either state.
+    const bridge = enableFull(makeBridgeWithConfig(false, false));
+    expect(bridge.notifyTaskFullReplyEnabled()).toBe(false);
+    bridge.handleSessionEvent("sess-B", { type: "turn/end", time: Date.now(), data: {} });
+    await flushTicks();
+    await new Promise((r) => setTimeout(r, 10));
+    const texts = sendTextMessage.mock.calls.map((c: any) => c[1] as string);
+    expect(texts.some((t) => t.includes("任务已完成"))).toBe(false);
+  });
+
+  it("on: /status shows the detail level and /notify status agrees", async () => {
+    const bridge = enableFull(makeBridgeWithConfig(false, true));
+    sendTextMessage.mockClear();
+    await bridge.handleMessage(wechatText("/notify status"));
+    const notifyText = sendTextMessage.mock.calls.map((c: any) => c[1] as string).join("\n");
+    expect(notifyText).toContain("跨会话任务完成提醒: on");
+    expect(notifyText).toContain("full");
+
+    sendTextMessage.mockClear();
+    await bridge.handleMessage(wechatText("/status"));
+    const statusText = sendTextMessage.mock.calls.map((c: any) => c[1] as string).join("\n");
+    expect(statusText).toContain("• 完成提醒内容: ⚪ 全文");
+  });
+
+  it("off: /status says 摘要, and the row is absent while the gate is off", async () => {
+    const bridge = makeBridgeWithConfig(false, true);
+    sendTextMessage.mockClear();
+    await bridge.handleMessage(wechatText("/status"));
+    const withGate = sendTextMessage.mock.calls.map((c: any) => c[1] as string).join("\n");
+    expect(withGate).toContain("• 完成提醒内容: ⚪ 摘要");
+
+    // Gate off: the detail row is meaningless, so it is omitted rather than
+    // advertising a setting that currently changes nothing.
+    sendTextMessage.mockClear();
+    const silentBridge = makeBridgeWithConfig(false, false);
+    await silentBridge.handleMessage(wechatText("/status"));
+    const withGateOff = sendTextMessage.mock.calls.map((c: any) => c[1] as string).join("\n");
+    expect(withGateOff).not.toContain("完成提醒内容");
+  });
+
+  it("round-trips through the config store the settings page posts to", async () => {
+    const { ConfigStore } = await import("../src/config-store.js");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wx-full-"));
+    try {
+      const store = new ConfigStore(dir);
+      expect(store.update({ notifyTaskFullReply: true }).notifyTaskFullReply).toBe(true);
+      expect(new ConfigStore(dir).stored().notifyTaskFullReply).toBe(true);
+      // Junk is refused rather than persisted as a truthy string.
+      expect(store.update({ notifyTaskFullReply: "yes" as never }).notifyTaskFullReply).toBe(true);
+      expect(new ConfigStore(dir).resolve(defaultConfig()).notifyTaskFullReply).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("WeChat-answer receipts are not gated by the cross-session switches", () => {
   /**
    * The cross-session switches gate *unsolicited* notices. A receipt for an

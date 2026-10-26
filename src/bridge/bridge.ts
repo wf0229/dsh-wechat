@@ -49,7 +49,7 @@ import {
 import type { WeChatDSHConfig } from "../config.js";
 import { defaultConfig } from "../config.js";
 import { EDITABLE_KEYS, type ConfigStore, type EditableConfig } from "../config-store.js";
-import { maskSecrets, maskUserId } from "../utils/redact.js";
+import { maskCredentials, maskSecrets, maskUserId } from "../utils/redact.js";
 import { AuditLog } from "../utils/audit.js";
 import {
   commandUsageHint,
@@ -488,6 +488,26 @@ function tailByCodePoint(text: string, count: number): { tail: string; truncated
     taken += 1;
   }
   return { tail: text.slice(start), truncated: start > 0 };
+}
+
+/**
+ * Render a finished session's whole last answer for a cross-session notice
+ * (`notifyTaskFullReply`).
+ *
+ * Deliberately NOT block-quoted per line, unlike the 80-character excerpt: the
+ * outbound markdown filter treats a leading `>` as a line-start marker and
+ * drops it, so quoting a real answer would either strip its own `>` markers or
+ * need a marker-injection pass over text that is already formatted — and the
+ * point of this switch is to show the answer exactly as the session produced
+ * it. A blank line above and below separates it from the notice's own lines.
+ *
+ * Masking is `maskCredentials`, not `maskSecrets`: the generic hex/base64 rules
+ * of the latter exist for snippets and would replace every commit SHA, digest
+ * and long identifier in a legitimate answer.
+ */
+function fullReplySuffix(text: string): string {
+  const body = maskCredentials(text).replace(/^\n+/, "").replace(/\s+$/, "");
+  return body ? `\n\n${body}\n` : "";
 }
 
 /**
@@ -3609,7 +3629,7 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * Block-quoted preview of a session's last assistant text for a
+   * Block-quoted excerpt of a session's last assistant text for a
    * cross-session notice, or "" when there is nothing to quote.
    *
    * Two deliberate properties:
@@ -3620,10 +3640,16 @@ export class WeChatDSHBridge {
    *     shown. Only this excerpt is masked; a normal reply body never is
    *     (the mask's hex/base64 rules would eat its commit SHAs).
    * Measured in code points, so a tail of emoji is not half a surrogate.
+   *
+   * `notifyTaskFullReply` widens this from the 80-character tail to the whole
+   * message (see {@link fullReplySuffix}); that variant is not block-quoted and
+   * masks with `maskCredentials`, because the generic hex/base64 rules would
+   * replace every commit SHA in a real answer.
    */
   private previewSuffix(sessionId: string): string {
     const preview = this.lastAssistantTextBySession.get(sessionId);
     if (!preview) return "";
+    if (this.notifyTaskFullReplyEnabled()) return fullReplySuffix(preview);
     const { tail, truncated } = tailByCodePoint(preview, PREVIEW_CHARS);
     return `\n> ${maskSecrets(tail)}${truncated ? "…" : ""}`;
   }
@@ -3901,6 +3927,16 @@ export class WeChatDSHBridge {
   /** Background task completion/error notice gate (decision cards only follow `crossSessionNotify`). */
   private notifyTaskEventsEnabled(): boolean {
     return this.config.notifyTaskEvents === true;
+  }
+
+  /**
+   * Whether a completion notice carries the finished session's WHOLE answer
+   * instead of the 80-character tail. Decides presentation only — the gate
+   * above decides whether a notice is sent at all, so this switch can never
+   * resurrect a disabled notice.
+   */
+  private notifyTaskFullReplyEnabled(): boolean {
+    return this.notifyTaskEventsEnabled() && this.config.notifyTaskFullReply === true;
   }
 
   /** Record that the card's full content was pushed to WeChat for this user. */
@@ -4294,9 +4330,10 @@ export class WeChatDSHBridge {
     if (cmd.kind === "status") {
       const on = this.shouldNotifyCrossSession(userId) ? "on" : "off";
       const task = this.notifyTaskEventsEnabled() ? "on" : "off";
+      const detail = this.notifyTaskFullReplyEnabled() ? "full（完成提醒带全文）" : "summary（完成提醒带摘要）";
       await this.sendReply(
         userId,
-        `🔔 跨会话决策推送: ${on}（任意会话的权限/提问卡整卡推送，微信直接回复）\n跨会话任务完成提醒: ${task}\n切换决策推送: /notify on|off\n切换任务提醒: /notify tasks on|off`,
+        `🔔 跨会话决策推送: ${on}（任意会话的权限/提问卡整卡推送，微信直接回复）\n跨会话任务完成提醒: ${task}（${detail}）\n切换决策推送: /notify on|off\n切换任务提醒: /notify tasks on|off\n完成提醒详细程度: 见设置页「完整显示任务完成回复」`,
       );
       return;
     }
@@ -6836,6 +6873,12 @@ export class WeChatDSHBridge {
       // 跨会话决策推送 on = extra delivery enabled (good); off = quiet (neutral).
       `• 跨会话决策推送: ${this.paintBadge(crossEffective, crossEffective === "on" ? "positive" : "neutral")}`,
       `• 跨会话任务完成提醒: ${this.paintBadge(this.notifyTaskEventsEnabled() ? "on" : "off", this.notifyTaskEventsEnabled() ? "positive" : "neutral")}`,
+      // Detail level of those notices — only worth a row while the notices
+      // themselves are on: showing "摘要 / 全文" next to an `off` gate would
+      // advertise a setting that currently changes nothing.
+      ...(this.notifyTaskEventsEnabled()
+        ? [`• 完成提醒内容: ${this.paintBadge(this.notifyTaskFullReplyEnabled() ? "全文" : "摘要", "neutral")}`]
+        : []),
     ];
 
     // Session-level projection registry (`ctx.sessionProjections`). One

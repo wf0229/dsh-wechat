@@ -30,7 +30,7 @@
   | 分组 | 包含 |
   |---|---|
   | 连接与默认行为 | `cwd` / `cardTimeoutMs` / `sendWechatRateLimitPerMinute` / `allowedUsers` |
-  | 消息推送 | `跨会话决策推送` / `跨会话任务完成提醒` / `静默` / `结论模式` |
+  | 消息推送 | `跨会话决策推送` / `跨会话任务完成提醒` + `完整显示任务完成回复`（完成提醒关闭时置灰）/ `静默` / `结论模式` |
   | 打字合并 | `打字合并` 总开关 + `mergeSilenceMs` / `mergeMaxMsgs` / `mergeForcedReleaseMs` / `合并后缀 .. 与 !!`（总开关关闭时参数置灰，但值仍随保存提交，不会丢配置） |
   | 图片与文件 | `图片/文件与文字合并发送` 总开关 + `mediaHoldMs`（等待上限，总开关关闭时置灰）+ `以 @引用 方式交给 AI`（独立开关，一直可点，因为交付措辞对所有附件生效） |
   | 微信渠道提示词 | `surfacePromptEnabled` + 提示词正文 |
@@ -98,6 +98,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 | `cardTimeoutMs` | `1800000` | 提问/权限卡软超时（30 分钟） |
 | `crossSessionNotify` | `false` | 跨会话决策推送总闸（任意会话的权限/提问卡整卡推送，微信直接回复） |
 | `notifyTaskEvents` | `false` | 跨会话任务完成/报错提醒（独立于决策推送，默认关） |
+| `notifyTaskFullReply` | `false` | 跨会话**完成提醒**里的内容量：`false`（默认）= 该会话这一轮回答的最后 80 字摘要（`> ` 引用块，尾部截断加 `…`）；`true` = 整段回答全文，不再截断也不再逐行引用（出站 markdown 过滤会把行首 `>` 当标记吃掉）。**只决定展示多少，不决定发不发**——`notifyTaskEvents` 关闭时本键不产生任何提醒。全文走 `maskCredentials`（只掩 API key / JWT / `Bearer ***` 这类确定凭证），因为 `maskSecrets` 的通用 hex/base64 规则会把回答里的每个 commit SHA 都换成 `***`；摘要仍走 `maskSecrets`。设置页「完整显示任务完成回复」同款；`/status` 在提醒开启时多一行 `• 完成提醒内容: 全文｜摘要`，`/notify status` 也会显示 |
 | `silent` | `false` | 静默模式总闸（只发**每轮**最终回复；重新扫码后仍保留） |
 | `finalOnly` | `false` | 结论模式总闸（跨轮次暂存，整条任务停下后只发**一条**最终结论；优先于 `silent`） |
 | `finalOnlyIdleMs` | `45000` | 结论模式静默期：任一活动事件（助手正文、轮次结束、`agent/status` 空闲/运行）都会把它重新推后 |

@@ -20,6 +20,7 @@ export type EditableConfig = Pick<
   | "cardTimeoutMs"
   | "crossSessionNotify"
   | "notifyTaskEvents"
+  | "notifyTaskFullReply"
   | "silent"
   | "finalOnly"
   | "finalOnlyIdleMs"
@@ -51,6 +52,7 @@ export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "cardTimeoutMs",
   "crossSessionNotify",
   "notifyTaskEvents",
+  "notifyTaskFullReply",
   "silent",
   "finalOnly",
   "finalOnlyIdleMs",
@@ -79,6 +81,7 @@ const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   "silent",
   "crossSessionNotify",
   "notifyTaskEvents",
+  "notifyTaskFullReply",
   "finalOnly",
   "allowRemotePermissionEscalation",
   "allowAnyFilePath",

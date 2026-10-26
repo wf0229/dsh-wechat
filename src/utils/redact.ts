@@ -21,8 +21,11 @@ const MASK = "***";
  * a specific pattern must claim its span before a greedy generic rule
  * (hex, base64) sees the string, and masking must replace the WHOLE
  * span — a partial mask (`sk-***`) still leaks the live suffix.
+ *
+ * Split in two — see {@link maskCredentials} for why the generic shapes are
+ * NOT part of the first list.
  */
-const RULES: readonly RegExp[] = [
+const CREDENTIAL_RULES: readonly RegExp[] = [
   // JWT — three base64url segments. The signature segment is quantified
   // lazily so that when two tokens are concatenated (a log line holding
   // an access + refresh pair) the first match stops at the first
@@ -36,11 +39,24 @@ const RULES: readonly RegExp[] = [
   /\bxox[baprs]-[A-Za-z0-9-]{10,}/g,
   // AWS access key ids.
   /\bAKIA[0-9A-Z]{12,}/g,
+];
+
+/**
+ * Shapes that ARE often secrets (hashes, HMACs, session keys) and are also
+ * routinely legitimate content in an answer: commit SHAs, file digests,
+ * package integrity values, long identifiers. Safe on an excerpt, ruinous on
+ * a whole reply — {@link maskSecrets} keeps them, {@link maskCredentials}
+ * does not.
+ */
+const GENERIC_RULES: readonly RegExp[] = [
   // Long hex runs: hashes, HMACs, session keys.
   /\b[0-9a-fA-F]{32,}\b/g,
   // Long base64 / base64url runs.
   /(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_=-]{40,}/g,
 ];
+
+/** Every rule, applied by {@link maskSecrets} in this order. */
+const RULES: readonly RegExp[] = [...CREDENTIAL_RULES, ...GENERIC_RULES];
 
 /**
  * Mask the credential after every `Bearer` scheme word, keeping the word.
@@ -101,9 +117,31 @@ function maskBearerTokens(text: string): string {
  * @returns the same text with every detected secret replaced by `***`.
  */
 export function maskSecrets(text: string): string {
+  return applyRules(text, RULES);
+}
+
+/**
+ * Mask only the UNAMBIGUOUS credentials — API keys, JWTs, cloud access key
+ * ids, `Bearer <token>` — and leave generic long-token shapes alone.
+ *
+ * This is the variant for text that may be a whole answer rather than a
+ * snippet: {@link maskSecrets}' hex/base64 rules would replace every commit
+ * SHA and digest in it, which is exactly the damage its own header warns
+ * about. Used for the `notifyTaskFullReply` notice, where the body IS the
+ * answer the user wants to read.
+ *
+ * `Bearer` masking is kept: the scheme word plus a token is a credential by
+ * construction, never prose.
+ */
+export function maskCredentials(text: string): string {
+  return applyRules(text, CREDENTIAL_RULES);
+}
+
+/** Run one rule list over `text` (shared by both entry points). */
+function applyRules(text: string, rules: readonly RegExp[]): string {
   if (!text) return text;
   let out = text;
-  for (const rule of RULES) {
+  for (const rule of rules) {
     // Each rule is a fresh literal, but a global RegExp keeps `lastIndex`
     // across calls — reset it so a shared module-level instance can never
     // skip a match on the second invocation.

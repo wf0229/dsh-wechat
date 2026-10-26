@@ -32,6 +32,8 @@ export interface PluginConfig {
   cardTimeoutMs?: number;
   silent?: boolean;
   finalOnly?: boolean;
+  /** Whole-answer completion notices (`notifyTaskEvents` must also be on). */
+  notifyTaskFullReply?: boolean;
   finalOnlyIdleMs?: number;
   finalOnlyCeilingMs?: number;
   surfacePromptEnabled?: boolean;

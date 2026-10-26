@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { maskSecrets } from "../src/utils/redact.js";
+import { maskCredentials, maskSecrets } from "../src/utils/redact.js";
 
 /** A realistic 3-segment JWT. */
 const JWT =
@@ -142,5 +142,59 @@ describe("maskSecrets: why it is not applied to reply bodies", () => {
     // error paths and the cross-session excerpt.
     expect(maskSecrets("sess-2f4c1c2e-9b3a-4d5e-8f01-abcdef012345"))
       .toBe("***");
+  });
+});
+
+/**
+ * `maskCredentials` — the narrower variant used when the text may be a WHOLE
+ * answer (`notifyTaskFullReply`) rather than a snippet.
+ *
+ * It exists because of the false positives pinned above: the same rules that
+ * make an 80-character excerpt safe turn a real answer into `***` wherever it
+ * names a commit, a digest or a long identifier. So the split is deliberate and
+ * both halves have to hold — unambiguous credentials still masked, generic
+ * long-token shapes left alone.
+ */
+describe("maskCredentials: only unambiguous credentials", () => {
+  it("still masks every shape that IS a credential", () => {
+    expect(maskCredentials(`token=${JWT}`)).toBe("token=***");
+    expect(maskCredentials("key sk-abcdefghijklmnopqrstuvwxyz012345")).toBe("key ***");
+    expect(maskCredentials("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")).toBe("***");
+    expect(maskCredentials("xoxb-1234567890-abcdefghijkl")).toBe("***");
+    expect(maskCredentials("AKIAIOSFODNN7EXAMPLE")).toBe("***");
+    expect(maskCredentials("Authorization: Bearer abcDEF123._-xyz")).toBe("Authorization: Bearer ***");
+  });
+
+  it("leaves the false positives that ruin a whole answer alone", () => {
+    // The three cases `maskSecrets` mangled above, now preserved: this is the
+    // entire reason the narrower rule list exists.
+    expect(maskCredentials("unbelievably-long-hyphenated-directory-name-here"))
+      .toBe("unbelievably-long-hyphenated-directory-name-here");
+    expect(maskCredentials("sess-2f4c1c2e-9b3a-4d5e-8f01-abcdef012345"))
+      .toBe("sess-2f4c1c2e-9b3a-4d5e-8f01-abcdef012345");
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    expect(maskCredentials(`commit ${sha} landed`)).toBe(`commit ${sha} landed`);
+    const digest = "0123456789abcdef0123456789abcdef";
+    expect(maskCredentials(`sha256 ${digest}`)).toBe(`sha256 ${digest}`);
+  });
+
+  it("keeps prose about a real answer intact", () => {
+    const answer = [
+      "## 修复内容",
+      "把 `url` 拼接改成 URLSearchParams，commit 3f2a9c1 已提交。",
+      "测试 1188 条全过，耗时 4.65s。",
+    ].join("\n");
+    expect(maskCredentials(answer)).toBe(answer);
+  });
+
+  it("is idempotent", () => {
+    for (const text of [
+      `token=${JWT}`,
+      "Authorization: Bearer abcDEF1234567890",
+      "commit 0123456789abcdef0123456789abcdef01234567",
+    ]) {
+      const once = maskCredentials(text);
+      expect(maskCredentials(once)).toBe(once);
+    }
   });
 });

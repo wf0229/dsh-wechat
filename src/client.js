@@ -73,6 +73,14 @@ window.__ModuleLoader__.load({
 .wx_toggles .wx_check{min-width:0;align-items:flex-start;line-height:1.45}
 .wx_toggles .wx_check input{margin-top:1px;flex:0 0 auto}
 .wx_toggles .wx_check span{min-width:0}
+/* 依赖父开关的子项：挂在勾选框下面，用缩进 + 竖线表示从属关系，
+   而不是在双列网格里自己占一格（那会把它排到左下角，离父开关很远）。 */
+/* 一个网格格子里放「父开关 + 它的子项」。子项必须留在同一个格子内，
+   否则双列网格会把它排到下一行、跑到左列邻居下面去。 */
+.wx_cell{display:flex;flex-direction:column;min-width:0}
+.wx_dep{display:flex;flex-direction:column;gap:6px;margin:2px 0 6px 24px;padding-left:10px;border-left:2px solid rgba(128,128,128,.28)}
+.wx_dep .wx_check{padding:2px 0}
+.wx_dep .wx_dep_hint{font-size:11px;color:var(--dsw-alias-label-secondary,#888);line-height:1.4}
 .wx_help{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:14px;height:14px;border-radius:50%;background:rgba(128,128,128,.22);color:var(--dsw-alias-label-secondary,#888);font-size:10px;font-weight:600;cursor:help;margin-left:6px;vertical-align:middle;position:relative;user-select:none;line-height:1}
 .wx_help:hover,.wx_help:focus{background:rgba(128,128,128,.42);outline:none;color:inherit}
 .wx_help_float{position:fixed;z-index:10000;padding:6px 10px;background:rgba(20,20,20,.92);color:#fff;font-size:11px;font-weight:400;white-space:pre-wrap;width:max-content;max-width:min(340px,calc(100vw - 16px));border-radius:6px;line-height:1.5;text-align:left;pointer-events:none;overflow-wrap:anywhere;box-shadow:0 4px 16px rgba(0,0,0,.28)}
@@ -505,6 +513,7 @@ window.__ModuleLoader__.load({
 				cardTimeoutMs: Number(form.cardTimeoutMs) || undefined,
 				crossSessionNotify: !!form.crossSessionNotify,
 				notifyTaskEvents: !!form.notifyTaskEvents,
+				notifyTaskFullReply: !!form.notifyTaskFullReply,
 				silent: !!form.silent,
 				finalOnly: !!form.finalOnly,
 				mergeEnabled: !!form.mergeEnabled,
@@ -601,6 +610,7 @@ window.__ModuleLoader__.load({
 						cardTimeoutMs: String(r.body.config?.cardTimeoutMs ?? ""),
 						crossSessionNotify: !!r.body.config?.crossSessionNotify,
 						notifyTaskEvents: !!r.body.config?.notifyTaskEvents,
+						notifyTaskFullReply: !!r.body.config?.notifyTaskFullReply,
 						surfacePromptEnabled: !!r.body.config?.surfacePromptEnabled,
 						surfacePrompt: r.body.config?.surfacePrompt ?? "",
 						silent: !!(r.body.config?.silent ?? (firstUser && firstUser.silent)),
@@ -756,7 +766,7 @@ window.__ModuleLoader__.load({
 					: "已关闭 · 每条消息各自一轮")
 				: "";
 			const deliverySummary = form
-				? `静默 ${onOff(form.silent)} · 结论 ${onOff(form.finalOnly)} · 决策推送 ${onOff(form.crossSessionNotify)} · 任务提醒 ${onOff(form.notifyTaskEvents)} · 状态 ${form.statusMode === "full" ? "详细" : "简洁"}`
+				? `静默 ${onOff(form.silent)} · 结论 ${onOff(form.finalOnly)} · 决策推送 ${onOff(form.crossSessionNotify)} · 任务提醒 ${onOff(form.notifyTaskEvents)}${form.notifyTaskEvents ? `（${form.notifyTaskFullReply ? "全文" : "摘要"}）` : ""} · 状态 ${form.statusMode === "full" ? "详细" : "简洁"}`
 				: "";
 			const mediaSummary = form
 				? (form.mediaMergeEnabled
@@ -888,10 +898,22 @@ window.__ModuleLoader__.load({
 									createElement("input", { type: "checkbox", checked: !!form?.crossSessionNotify, onChange: (e) => setForm({ ...form, crossSessionNotify: e.target.checked }) }),
 									createElement("span", null, "跨会话决策推送"),
 									createElement(HelpTip, { text: "别的会话（不是你现在聊的这个）需要你拍板的权限卡、提问卡，也整张推到微信，你可以直接回复。默认关闭。" })),
-								createElement("label", { className: "wx_check" },
-									createElement("input", { type: "checkbox", checked: !!form?.notifyTaskEvents, onChange: (e) => setForm({ ...form, notifyTaskEvents: e.target.checked }) }),
-									createElement("span", null, "跨会话任务完成提醒"),
-									createElement(HelpTip, { text: "别的会话的任务做完或者报错了，也用微信提醒你一声。跟上面的决策推送互相独立，默认关闭。" })),
+								// 「任务完成提醒」和它的子项占同一个网格格子：双列网格按
+								// 行填装，子项若是网格的独立子元素（哪怕 grid-column:1/-1
+								// 占满整行），也会落到下一行、视觉上跑到左列「跨会话决策
+								// 推送」下面。包成一个单元格，它才真正挂在父开关正下方。
+								// 关闭父项时置灰但值仍随保存提交，重新打开不会丢选择。
+								createElement("div", { className: "wx_cell" },
+									createElement("label", { className: "wx_check" },
+										createElement("input", { type: "checkbox", checked: !!form?.notifyTaskEvents, onChange: (e) => setForm({ ...form, notifyTaskEvents: e.target.checked }) }),
+										createElement("span", null, "跨会话任务完成提醒"),
+										createElement(HelpTip, { text: "别的会话的任务做完或者报错了，也用微信提醒你一声。跟上面的决策推送互相独立，默认关闭。" })),
+									createElement("div", { className: "wx_dep" },
+										createElement("label", { className: "wx_check" },
+											createElement("input", { type: "checkbox", checked: !!form?.notifyTaskFullReply, onChange: (e) => setForm({ ...form, notifyTaskFullReply: e.target.checked }), disabled: !form?.notifyTaskEvents }),
+											createElement("span", null, "完整显示任务完成回复"),
+											createElement(HelpTip, { text: "默认关闭：完成提醒只带最后 80 字摘要，一眼看完，适合只要知道「做完了」的场景。打开后，提醒里带该会话这一轮回答的**全文**，不用切过去也知道结论——但长回答会占掉不少消息额度（微信一个窗口最多连发 10 条）。只在上面「跨会话任务完成提醒」打开时生效。" })),
+										createElement("div", { className: "wx_dep_hint" }, "仅在「跨会话任务完成提醒」开启时生效"))),
 								createElement("label", { className: "wx_check" },
 									createElement("input", { type: "checkbox", checked: !!form?.silent, onChange: (e) => setForm({ ...form, silent: e.target.checked }) }),
 									createElement("span", null, "静默"),

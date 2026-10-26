@@ -80,6 +80,37 @@ describe("settings panel ↔ host config wiring", () => {
     expect(client).toContain("`!!`");
   });
 
+  // `statusMode` is an ENUM, not a checkbox: it has its own silent-failure
+  // modes (a radio that never initialises renders "brief" over a stored
+  // "full", and a payload that forgets the key leaves the old value behind).
+  it("statusMode is initialised, rendered and saved as an enum", () => {
+    expect(client).toContain("r.body.config?.statusMode");
+    // Radios, not checkboxes — the two options are exclusive.
+    expect(client).toContain('type: "radio", name: "statusMode"');
+    expect(client).toContain('setForm({ ...form, statusMode: "brief" })');
+    expect(client).toContain('setForm({ ...form, statusMode: "full" })');
+    expect(client).toContain('statusMode: form.statusMode === "full" ? "full" : "brief"');
+    // Both spellings are offered, and the WeChat-side switch is documented.
+    expect(client).toContain("简洁");
+    expect(client).toContain("详细");
+    expect(client).toContain("/status brief|full");
+    // The summary line has to mention it, or a collapsed group hides the
+    // setting entirely.
+    expect(client).toContain('form.statusMode === "full" ? "详细" : "简洁"');
+    expect((EDITABLE_KEYS as readonly string[]).includes("statusMode")).toBe(true);
+    expect(defaultConfig().statusMode).toBe("brief");
+  });
+
+  it("statusMode lives in the delivery group, not a seventh group", () => {
+    // The panel is pinned at six groups (the grouping test below counts the
+    // `createElement(Group, {` calls); a new enum must join an existing one.
+    const deliveryStart = client.indexOf('id: "delivery"');
+    const mergeStart = client.indexOf('id: "merge"');
+    expect(deliveryStart).toBeGreaterThan(-1);
+    expect(mergeStart).toBeGreaterThan(deliveryStart);
+    expect(client.slice(deliveryStart, mergeStart)).toContain('name: "statusMode"');
+  });
+
   // The two text/number fields have their own silent-failure modes, so they are
   // guarded the same way the checkboxes are: a field that is missing from the
   // form init renders empty, and one missing from the save payload sends

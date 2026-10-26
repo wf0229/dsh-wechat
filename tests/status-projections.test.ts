@@ -93,6 +93,10 @@ function makeBridge(opts: {
   };
   const cfg = defaultConfig();
   cfg.storageDir = dir;
+  // These assertions describe the FULL rendering (four buckets). The shipped
+  // default is `brief`, which prints only `[模式]` — see
+  // `tests/status-mode.test.ts` for that half.
+  cfg.statusMode = "full";
   const bridge = new WeChatDSHBridge(ctx, cfg);
   (bridge as unknown as { token: unknown }).token = {
     baseUrl: "https://gw",

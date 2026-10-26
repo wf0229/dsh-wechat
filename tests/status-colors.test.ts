@@ -250,4 +250,22 @@ describe("/status — emoji color markers", () => {
     const text = await runStatus(makeBridge({ agent: { agentStatus: "idle" } }));
     expect(text).not.toContain("待处理");
   });
+
+  it("入站白名单 off is just the badge — no rule paragraph on every /status", async () => {
+    // The empty list is still a security-relevant state (🔴 关), but the
+    // "first contact wins" explanation belongs in DEVELOPMENT.md, not in a
+    // bubble the user reads on a phone several times a day.
+    const text = await runStatus(makeBridge({ agent: { agentStatus: "idle" } }));
+    expect(text).toContain("• 入站白名单: 🔴 关");
+    expect(text).not.toContain("首位给你发消息");
+    expect(text).not.toContain("绑定对端");
+  });
+
+  it("审计日志 row is the path only, without the rotation policy", async () => {
+    const text = await runStatus(makeBridge({ agent: { agentStatus: "idle" } }));
+    expect(text).toContain("• 审计日志: ");
+    expect(text).toContain("audit.jsonl");
+    expect(text).not.toContain("轮转为");
+    expect(text).not.toContain("1 MiB");
+  });
 });

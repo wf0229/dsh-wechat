@@ -277,6 +277,56 @@ describe("/session new reuses a blank session", () => {
     );
   });
 
+  it("reports preset, model and effort after creating a fresh session", async () => {
+    const anyBridge = await setupWithSessions(
+      [{ id: "used", createdAt: 100, cwd: "C:\\work" }],
+      () => 999,
+    );
+    const ops = anyBridge.ops as unknown as {
+      defaultPresetId(): string | undefined;
+      listPresets(): Promise<Array<{ id: string; name?: string }>>;
+      resolveModelReasoning(p: string, m: string): Promise<unknown>;
+    };
+    ops.defaultPresetId = () => "std";
+    ops.listPresets = async () => [{ id: "std", name: "标准模式" }];
+    ops.resolveModelReasoning = async () => ({ efforts: [{ id: "medium", name: "中" }] });
+    (mock.agent as unknown as { options: unknown }).options = {
+      provider: "deepseek",
+      model: "deepseek-chat",
+      reasoningEffort: "medium",
+    };
+    const user = anyBridge.state.getUser("u1");
+    user.sessionId = "";
+    await anyBridge.handleSessionCommand("u1", { kind: "new" });
+
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("已创建新会话");
+    expect(body).toContain("• 预设: 标准模式");
+    expect(body).toContain("模型: deepseek/deepseek-chat");
+    expect(body).toContain("思考等级: 中");
+  });
+
+  it("reports the profile when reusing a blank session", async () => {
+    const anyBridge = await setupWithSessions([
+      { id: "blank-old", createdAt: 100, cwd: "C:\\work" },
+    ]);
+    const ops = anyBridge.ops as unknown as {
+      defaultPresetId(): string | undefined;
+      listPresets(): Promise<Array<{ id: string; name?: string }>>;
+    };
+    ops.defaultPresetId = () => "cordis";
+    ops.listPresets = async () => [{ id: "cordis", name: "创造模式" }];
+    const user = anyBridge.state.getUser("u1");
+    user.sessionId = "";
+    await anyBridge.handleSessionCommand("u1", { kind: "new" });
+
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("已复用空白会话");
+    expect(body).toContain("• 预设: 创造模式");
+    expect(body).toContain("模型: deepseek/deepseek-chat");
+    expect(body).toContain("思考等级: 默认");
+  });
+
   it("creates a fresh session when the current binding is unreadable", async () => {
     const anyBridge = await setupWithSessions(
       [{ id: "session-corrupt", createdAt: 100, cwd: "C:\\work" }],
@@ -469,6 +519,37 @@ describe("/workspace switch reports the restored session", () => {
     const body = String(sendTextMessage.mock.calls[0]?.[1]);
     expect(body).toContain("已切换到工作区: work — C:\\work");
     expect(body).toContain("该工作区暂无会话，发送消息将创建");
+    // No session bound → nothing to describe; the preset/model row would be
+    // a guess, so it is omitted rather than filled with "（默认）".
+    expect(body).not.toContain("• 预设:");
+  });
+
+  it("reports preset, model and effort for the restored session", async () => {
+    const anyBridge = setupWorkspaces(
+      [{ id: "w1", path: "C:\\work", title: "work", sessionIds: ["s-visible"] }],
+      [],
+      { "s-visible": "可见会话" },
+    );
+    const ops = anyBridge.ops as unknown as {
+      defaultPresetId(): string | undefined;
+      listPresets(): Promise<Array<{ id: string; name?: string }>>;
+      resolveModelReasoning(p: string, m: string): Promise<unknown>;
+    };
+    ops.defaultPresetId = () => "cordis";
+    ops.listPresets = async () => [{ id: "cordis", name: "创造模式" }];
+    ops.resolveModelReasoning = async () => ({ efforts: [{ id: "high", name: "高" }] });
+    (anyBridge as unknown as { agents: { get(): unknown } }).agents.get = () => ({
+      id: "s-visible",
+      status: "idle",
+      options: { provider: "deepseek", model: "deepseek-reasoner", reasoningEffort: "high" },
+    });
+
+    await anyBridge.handleWorkspaceCommand("u1", { kind: "switch", target: "1" });
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("已恢复会话: 可见会话（s-visible）");
+    expect(body).toContain("• 预设: 创造模式");
+    expect(body).toContain("模型: deepseek/deepseek-reasoner");
+    expect(body).toContain("思考等级: 高");
   });
 });
 
@@ -764,6 +845,72 @@ describe("/session switch reports the session name", () => {
     const body = String(sendTextMessage.mock.calls[0]?.[1]);
     expect(body).toContain("已切换到会话 最新会话（session-new） — C:\\work");
     expect(body).toContain("Agent");
+  });
+
+  it("reports the preset, model and reasoning effort of the session switched into", async () => {
+    const anyBridge = bridge as unknown as {
+      state: { ensureUser(u: string, c: string): { userId: string; cwd: string; sessionId: string; silent: boolean } };
+      ops: {
+        listSessions(): Promise<Array<{ header: { id: string; createdAt: number; cwd?: string } }>>;
+        readSessionTitle(id: string): Promise<string | undefined>;
+        resolveSessionPreset(id: string, cwd?: string): Promise<string | undefined>;
+        listPresets(): Promise<Array<{ id: string; name?: string }>>;
+        resolveModelReasoning(p: string, m: string): Promise<unknown>;
+      };
+      handleSessionCommand(u: string, cmd: { kind: "switch"; index: number }): Promise<void>;
+    };
+    anyBridge.ops.listSessions = async () => [
+      { header: { id: "session-cordis", createdAt: 100, cwd: "C:\\work" } },
+    ];
+    anyBridge.ops.readSessionTitle = async () => "创造会话";
+    anyBridge.ops.resolveSessionPreset = async () => "cordis";
+    anyBridge.ops.listPresets = async () => [{ id: "cordis", name: "创造模式" }];
+    anyBridge.ops.resolveModelReasoning = async () => ({
+      efforts: [{ id: "high", name: "高" }],
+      defaultEffort: "high",
+    });
+    // The switched-into agent carries a durable selection with an effort, the
+    // exact shape `resolveEffectiveModel` reads first.
+    (mock.agent as unknown as { options: unknown }).options = {
+      provider: "deepseek",
+      model: "deepseek-reasoner",
+      reasoningEffort: "high",
+    };
+    anyBridge.state.ensureUser("u1", "C:\\work");
+    await anyBridge.handleSessionCommand("u1", { kind: "switch", index: 1 });
+
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("• 预设: 创造模式");
+    expect(body).toContain("模型: deepseek/deepseek-reasoner");
+    expect(body).toContain("思考等级: 高");
+  });
+
+  it("falls back to the deployment default preset when the session has none recorded", async () => {
+    const anyBridge = bridge as unknown as {
+      state: { ensureUser(u: string, c: string): { userId: string; cwd: string; sessionId: string; silent: boolean } };
+      ops: {
+        listSessions(): Promise<Array<{ header: { id: string; createdAt: number; cwd?: string } }>>;
+        readSessionTitle(id: string): Promise<string | undefined>;
+        resolveSessionPreset(id: string, cwd?: string): Promise<string | undefined>;
+        defaultPresetId(): string | undefined;
+        listPresets(): Promise<Array<{ id: string; name?: string }>>;
+      };
+      handleSessionCommand(u: string, cmd: { kind: "switch"; index: number }): Promise<void>;
+    };
+    anyBridge.ops.listSessions = async () => [
+      { header: { id: "session-plain", createdAt: 100, cwd: "C:\\work" } },
+    ];
+    anyBridge.ops.readSessionTitle = async () => "普通会话";
+    anyBridge.ops.resolveSessionPreset = async () => undefined;
+    anyBridge.ops.defaultPresetId = () => "std";
+    anyBridge.ops.listPresets = async () => [{ id: "std", name: "标准模式" }];
+    anyBridge.state.ensureUser("u1", "C:\\work");
+    await anyBridge.handleSessionCommand("u1", { kind: "switch", index: 1 });
+
+    const body = String(sendTextMessage.mock.calls[0]?.[1]);
+    expect(body).toContain("• 预设: 标准模式");
+    // No effort set anywhere → the model default, never an empty slot.
+    expect(body).toContain("思考等级: 默认");
   });
 
   it("keeps the current scope when switching after list current", async () => {

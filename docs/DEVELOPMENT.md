@@ -117,6 +117,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 | `mediaAtRefEnabled` | `false` | 附件交付**措辞**：`false`（默认）= 「文件已保存到: 路径」纯文本，任何宿主上都能正常阅读；`true` = 按宿主 `@路径` 语法交付（`@"…"` 表示含空格），与 GUI 拖文件同一条链路，消息里是一个**可点开的引用**——但它依赖宿主挂载了文件引用插件，没挂载时只会显示成一行裸 `@C:/…`，所以默认关闭。两者都只给指针，**文件内容永不内联**（0.12 的内联行为已在 0.13.0 删除，这个开关救不回来）。`/media at\|path` 与设置页同款 |
 | `surfacePromptEnabled` | `false` | 微信渠道提示词总闸（微信消息驱动时注入，GUI 消息时仍隐藏） |
 | `surfacePrompt` | 见默认中文 | 注入正文（设置页编辑；含 `{{` 会被打散以免打断 DSH interpolate） |
+| `statusMode` | `"brief"` | `/status` 末尾「会话级状态」显示多少：`brief` 只出 `[模式]` 与 `[后台任务]`；`full` 出 `[模式]`/`[用量与统计]`/`[会话]`/`[其它]` 四段全量，再加 `[后台任务]`。**只影响这一段**，上面的工作区/会话/模型/权限/各开关行两种模式完全一致。`/status brief\|full` 与设置页「状态详细程度」同款；非法值（手改 `config.json` 写 `"verbose"`）在加载时丢弃并回落 `brief` |
 
 ## 命令接入方式
 
@@ -142,9 +143,9 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 
 | 命令 | 实现要点 |
 |---|---|
-| `/status` | 工作区、会话、Agent、待处理(当前)/待处理(跨会话)、当前会话 Preset、模型、上下文、权限、默认 Preset、静默、结论模式、繁忙投递、跨会话决策推送、跨会话任务完成提醒；末尾追加 DSH 通过 `ctx.sessionProjections` 注册的所有会话级状态，分四段显示——`[模式]`（plan / goal / subagent / todos）、`[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类）；DSH 加新 plugin 自动出现 |
-| `/workspace (ws)` | `list` 默认显示 20 个、按添加顺序（新加的排最前），`all` 或显式数量看更多；显示各工作区会话数，不含已归档；switch/add 回复会写明恢复的会话名字和完整 id，跳过已归档；该目录无可见会话时提示发送消息将创建 |
-| `/session (s)` | `list` 默认最近 20 个，`all` 或显式数量看更多，标记当前，不显示 GUI 已归档会话；**置顶会话排在列表最前并标 `📌`**，`pin`/`unpin` 省略编号时作用于当前会话，带编号时按 `/s list` 的行号解析；`list current` 只看当前工作目录——cwd 按宿主 `fs.promises.realpath` 规则归一（尾斜杠/`..`/大小写差异都能匹配），推荐用 `switch current <编号>` 按同一列表切换；紧接着直接 `switch <编号>` 也会复用最近一次列表编号；普通无列表上下文时 `switch <编号>` 对应全量列表；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建 |
+| `/status` | 工作区、会话、Agent、待处理(当前)/待处理(跨会话)、当前会话 Preset、模型、上下文、权限、默认 Preset、静默、结论模式、繁忙投递、跨会话决策推送、跨会话任务完成提醒；末尾「会话级状态」按 `statusMode`（默认 `brief`）显示——`brief` 只出 `[模式]`（plan / goal / subagent / todos）与 `[后台任务]`，`full` 另加 `[用量与统计]`（tokenUsage / contextPressure / contextBreakdown / sessionStats / subagentTiming）、`[会话]`（title / sessionListMetadata / permissions / imageLimits）、`[其它]`（未识别 key 自动归类），DSH 加新 plugin 自动出现。`[后台任务]` 读宿主 `ctx.jobs`（`job_list` 那套），**只统计当前绑定会话名下的后台任务**（`list(sessionId)` 的 owner fence + `owner === sessionId` 二次过滤，别的会话与无主任务都不算），输出总数与运行中明细（`running`/`stopping` 都算运行中，最多列 5 条，其余合成「另有 N 个运行中」）；**一个任务都没有时整段不出现**（不留 `共 0 个` 占位），有任务但都不在跑时只出一行 `⚪ 共 N 个`；服务缺失、未绑定会话或读取抛错时同样整段省略，`/status` 永不因此失败。`/status brief\|full` 切换并持久化到 `config.json` |
+| `/workspace (ws)` | `list` 默认显示 20 个、按添加顺序（新加的排最前），`all` 或显式数量看更多；显示各工作区会话数，不含已归档；switch/add 回复会写明恢复的会话名字和完整 id，跳过已归档，并附一行 `• 预设: … · 模型: … · 思考等级: …`（见 `/session` 的说明）；该目录无可见会话时提示发送消息将创建（没有会话可描述，该行省略） |
+| `/session (s)` | `list` 默认最近 20 个，`all` 或显式数量看更多，标记当前，不显示 GUI 已归档会话；**置顶会话排在列表最前并标 `📌`**，`pin`/`unpin` 省略编号时作用于当前会话，带编号时按 `/s list` 的行号解析；`list current` 只看当前工作目录——cwd 按宿主 `fs.promises.realpath` 规则归一（尾斜杠/`..`/大小写差异都能匹配），推荐用 `switch current <编号>` 按同一列表切换；紧接着直接 `switch <编号>` 也会复用最近一次列表编号；普通无列表上下文时 `switch <编号>` 对应全量列表；`new` 复用当前工作区空白会话，与 GUI「新建会话」同款，无空白才新建。**`switch` / `new` 的回复固定多一行 `• 预设: X · 模型: provider/model · 思考等级: Y`**：切换/新建改变的正是这三项，直接答在回复里，省掉再发 `/status`（或 `/preset status` + `/model status` + `/reasoning status`）。预设取该会话的 live 值（与 `/status`「当前会话 Preset」同源，`agent-preset/selected` 事件优先），无记录时回落部署默认（新建会话必然落到这里）；模型走 `/status` 同一条优先级链（本会话 override > `modelSelection` projection > 最近请求记录 > Agent 创建参数 > 部署默认）；思考等级取该模型适配器自己的名称（`high` 显示为 `/reasoning list` 里的中文名），未设置时写「默认」而不是留空。三段各自独立降级——预设名缺失、宿主没有 `llm` 服务、等级名查不到，都不会让整行消失或让回复失败 |
 | `/preset (p)` | 默认 Preset 写入 DSH 设置，与 GUI 同步；`status` 看全局默认，不是当前会话；当前会话无内容时 `switch` 立即应用 |
 | `/model` | 切换立即作用于当前会话 + 设为默认；与 GUI 模型选择器同源，走宿主 `sessionController.selectModel`，GUI 里也会立刻显示新模型；当前推理等级若新模型支持则一并保留，否则清空 |
 | `/perm` | `switch` 实时切当前会话；`default` 写 DSH 设置，新会话生效 |

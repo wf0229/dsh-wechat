@@ -7,7 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { defaultConfig, LEGACY_SURFACE_PROMPTS, type WeChatDSHConfig } from "./config.js";
+import { defaultConfig, LEGACY_SURFACE_PROMPTS, type StatusMode, type WeChatDSHConfig } from "./config.js";
 import { ensurePrivateDir, writePrivateFile } from "./utils/secure-fs.js";
 
 export type EditableConfig = Pick<
@@ -39,6 +39,7 @@ export type EditableConfig = Pick<
   | "mediaMergeEnabled"
   | "mediaHoldMs"
   | "mediaAtRefEnabled"
+  | "statusMode"
 >;
 
 export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
@@ -69,6 +70,7 @@ export const EDITABLE_KEYS: Array<keyof EditableConfig> = [
   "mediaMergeEnabled",
   "mediaHoldMs",
   "mediaAtRefEnabled",
+  "statusMode",
 ];
 
 /** Boolean config keys: a non-boolean from a hand-edited file would be truthy-by-accident. */
@@ -106,6 +108,18 @@ const POSITIVE_NUMBER_KEYS: ReadonlySet<string> = new Set([
  * which is also the escape hatch tests and `merge-averse` installs use.
  */
 const NON_NEGATIVE_NUMBER_KEYS: ReadonlySet<string> = new Set(["mergeSilenceMs"]);
+
+/**
+ * Enum-valued config keys and the exact spellings each accepts.
+ *
+ * Not a boolean: `statusMode` has two meaningful values today and a third
+ * ("stats-only"?) is the obvious next request, while a boolean guard would let
+ * a hand-edited `"no"` (truthy!) through and silently mean `"full"`. A value
+ * outside this set is dropped, so the built-in default applies.
+ */
+const ENUM_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["statusMode", new Set<StatusMode>(["brief", "full"])],
+]);
 
 export class ConfigStore {
   private readonly filePath: string;
@@ -157,7 +171,15 @@ export class ConfigStore {
           for (const key of Object.keys(parsed)) {
             const value = (parsed as Record<string, unknown>)[key];
             if (value === undefined) continue;
-            if (BOOLEAN_KEYS.has(key) && typeof value !== "boolean") {
+            const allowed = ENUM_KEYS.get(key);
+            if (allowed) {
+              // A hand-edited `statusMode: "verbose"` would otherwise reach
+              // `/status` as an unknown mode and be treated as "not brief",
+              // i.e. silently full.
+              if (typeof value !== "string" || !allowed.has(value)) {
+                delete (parsed as Record<string, unknown>)[key];
+              }
+            } else if (BOOLEAN_KEYS.has(key) && typeof value !== "boolean") {
               delete (parsed as Record<string, unknown>)[key];
             } else if (POSITIVE_NUMBER_KEYS.has(key) && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) {
               delete (parsed as Record<string, unknown>)[key];
@@ -198,6 +220,8 @@ export class ConfigStore {
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) continue;
       if (!(EDITABLE_KEYS as string[]).includes(key)) continue;
+      const allowed = ENUM_KEYS.get(key);
+      if (allowed && (typeof value !== "string" || !allowed.has(value))) continue;
       if (BOOLEAN_KEYS.has(key) && typeof value !== "boolean") continue;
       if (POSITIVE_NUMBER_KEYS.has(key) && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) continue;
       if (NON_NEGATIVE_NUMBER_KEYS.has(key) && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) continue;

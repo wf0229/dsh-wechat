@@ -47,6 +47,7 @@ export interface PluginConfig {
   mediaMergeEnabled?: boolean;
   mediaHoldMs?: number;
   mediaAtRefEnabled?: boolean;
+  statusMode?: "brief" | "full";
 }
 
 export function apply(ctx: unknown, rawConfig: PluginConfig = {}): () => Promise<void> {

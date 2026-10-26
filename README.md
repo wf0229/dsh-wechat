@@ -33,7 +33,7 @@ dsh plugin --profile desktop list --depth 0    # 查看已装版本
 |---|---|
 | `/help`（`/h`、`/?`） | 命令一览，含当前 profile 已注册的 DSH 原生命令 |
 | `/help <命令>` | 该命令的全部例子，如 `/help s`、`/help merge` |
-| `/status` | 工作区、会话、模型、上下文、权限、各开关状态 |
+| `/status` | 工作区、会话、模型、权限、各开关状态；末尾会话级状态默认只显示模式和后台任务（`/status full` 看全部） |
 | `/workspace`（`/ws`） | `list` / `status` / `switch <编号\|路径>` / `add <路径>` |
 | `/session`（`/s`） | `list [current]` / `switch [current]` / `pin` / `unpin` / `new` / `status` |
 | `/preset`（`/p`） | `list` / `switch <名称\|编号>` / `status` — 默认 Preset，与 GUI 同步 |

@@ -14,9 +14,10 @@
  */
 
 import { findHelpEntry, helpCatalog, shortestSpelling } from "../help-catalog.js";
+import type { StatusMode } from "../config.js";
 
 export type HelpCommand = { kind: "help" };
-export type StatusCommand = { kind: "status" };
+export type StatusCommand = { kind: "status"; mode?: StatusMode };
 export type SilentCommand = { kind: "silent"; mode: "on" | "off" | "status" };
 export type FinalCommand = { kind: "final"; mode: "on" | "off" | "status" };
 export type MergeCommand = { kind: "merge"; mode: "on" | "off" | "status" };
@@ -88,11 +89,21 @@ export function parseHelpCommand(
   return findHelpEntry(rest) ? { topic: rest } : { unknown: rest };
 }
 
-/** Parse `/status`. */
+/**
+ * Parse `/status` — bare for a report, `brief` / `full` to switch how much of
+ * the trailing 「会话级状态」 section is printed.
+ *
+ * The switch is spelled exactly like every other local toggle (`/silent on`,
+ * `/merge off`): a lowercase English word, no Chinese aliases. `/status now`
+ * stays unparsed on purpose — it is not a mode, and answering it with the
+ * usage line is better than silently treating it as a report request.
+ */
 export function parseStatusCommand(text: string): StatusCommand | null {
   const trimmed = text.trim().toLowerCase();
   if (trimmed === "/status") return { kind: "status" };
-  return null;
+  const m = trimmed.match(/^\/status\s+(brief|full)\s*$/);
+  if (!m) return null;
+  return { kind: "status", mode: m[1] as StatusMode };
 }
 
 /**
@@ -1432,10 +1443,17 @@ const PROJECTION_RENDERERS: Record<string, (v: unknown) => string | undefined> =
  *
  * @param values The `snapshot(session).values` map from
  *   `ctx.sessionProjections`.
+ * @param options.mode `"full"` (default) renders every bucket; `"brief"`
+ *   renders `[模式]` only. The default is `"full"` so every existing caller
+ *   (and every existing test) keeps the pre-0.14 output; the bridge passes
+ *   `config.statusMode` explicitly.
  * @returns Pre-formatted lines ready to be appended to `/status`.
  *   Empty when `values` has no keys with renderable output.
  */
-export function renderProjectionSection(values: Record<string, unknown>): string[] {
+export function renderProjectionSection(
+  values: Record<string, unknown>,
+  options: { mode?: StatusMode } = {},
+): string[] {
   type Bucket = Array<{ key: string; lines: string[] }>;
   const buckets: Record<ProjectionGroup, Bucket> = {
     mode: [],
@@ -1446,6 +1464,10 @@ export function renderProjectionSection(values: Record<string, unknown>): string
 
   for (const key of Object.keys(values).sort()) {
     const group = PROJECTION_GROUP[key] ?? "other";
+    // Brief mode skips non-mode keys entirely: their renderers are pure and
+    // cheap, but a key whose renderer would throw must not emit a warn line
+    // for a bucket the user has explicitly asked not to see.
+    if (options.mode === "brief" && group !== "mode") continue;
     const value = values[key];
 
     let rendered: string | string[] | undefined;
@@ -1478,8 +1500,115 @@ export function renderProjectionSection(values: Record<string, unknown>): string
     out.push("");
   }
   // Trim trailing blank line so the section joins cleanly with whatever
-  // the caller appends next (currently nothing — the `/status` output
-  // ends here).
+  // the caller appends next (the `[后台任务]` block, when this session has
+  // background jobs).
   if (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out;
+}
+
+// ─── Background jobs (`ctx.jobs`) → `[后台任务]` ──────────────────────────
+//
+// `/status` used to end at the projection section. DSH also runs background
+// jobs (the `job_list` / `job_output` / `job_kill` family), and "something is
+// still running" is exactly the kind of state a user needs BEFORE deciding to
+// send another instruction — so it belongs in `/status`, in both modes.
+//
+// Scope: only the CURRENT session's jobs. The registry fences reads by owner
+// (`list(caller)` returns the caller's jobs plus unowned ones), and an unowned
+// job belongs to no conversation at all, so the bridge filters to
+// `owner === sessionId` and never scans other sessions.
+//
+// Naming: the banner is `[后台任务]`, matching what the rows inside actually
+// are. It was briefly `[后台会话]`, which described the *scope* (this session)
+// rather than the *content* (background jobs) and read as if other WeChat
+// sessions were listed there.
+
+/**
+ * The subset of one `JobView` the `/status` block reads.
+ *
+ * Declared structurally (not imported from `@deepseek-ai/*`) so the bridge
+ * keeps its zero-runtime-coupling contract; the host's `JobView` is a
+ * superset and fits by duck typing.
+ */
+export interface BackgroundJobView {
+  id: string;
+  kind: string;
+  label: string;
+  status: string;
+  progress?: string;
+  startedAt?: number;
+}
+
+/** How many running jobs get their own line before the rest are summarised. */
+export const BACKGROUND_JOB_DETAIL_MAX = 5;
+
+/** Statuses that still describe live work. `stopping` is winding down, not done. */
+const BACKGROUND_JOB_LIVE: ReadonlySet<string> = new Set(["running", "stopping"]);
+
+/** Compact duration for one running job (`"40s"`, `"2m"`, `"1.5h"`). */
+function formatJobAge(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "?";
+  if (ms < 1000) return "0s";
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  return `${(ms / 3_600_000).toFixed(1)}h`;
+}
+
+/**
+ * Render the `[后台任务]` block for one session's jobs.
+ *
+ * Output shape (same indentation as the projection buckets, so the two blocks
+ * read as one section):
+ *
+ * ```
+ * [后台任务]
+ *   • 🟢 共 3 个 · 运行中 2 个
+ *     ▶ bash · npm run build（已运行 2m）
+ *     ▶ bash · vitest --watch（已运行 40s） · 编译中
+ * ```
+ *
+ * Rules:
+ *   - **Empty input → `[]`.** Nothing running and nothing recorded is not news;
+ *     a `共 0 个` row on every single `/status` is exactly the kind of noise
+ *     「简洁」 exists to remove. The caller then prints no banner either, so a
+ *     host without the `jobs` service and a host with no jobs look identical.
+ *   - Jobs exist but none is running → one line, `⚪ 共 N 个`. The count is the
+ *     answer to "did anything pile up?"; per-job detail is only useful while
+ *     something is alive.
+ *   - More than {@link BACKGROUND_JOB_DETAIL_MAX} running jobs → the first N
+ *     (oldest first) plus `… 另有 M 个运行中`.
+ *   - `label` / `progress` are truncated so one row cannot wrap into a wall on
+ *     a phone; the whole row is capped at 400 chars for the same reason.
+ *
+ * Pure function: `now` is injectable so the age column is testable.
+ */
+export function renderBackgroundJobsSection(
+  jobs: readonly BackgroundJobView[],
+  now: number = Date.now(),
+): string[] {
+  if (jobs.length === 0) return [];
+  const running = jobs
+    .filter((job) => BACKGROUND_JOB_LIVE.has(job.status))
+    // Oldest first: the job that has been running longest is the one the user
+    // is most likely to have forgotten about.
+    .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
+
+  const count = running.length > 0
+    ? `🟢 共 ${jobs.length} 个 · 运行中 ${running.length} 个`
+    : `⚪ 共 ${jobs.length} 个`;
+  const out = ["[后台任务]", `  • ${count}`];
+
+  for (const job of running.slice(0, BACKGROUND_JOB_DETAIL_MAX)) {
+    const kind = job.kind.trim() || "job";
+    const label = truncateForWeChat(job.label.trim() || job.id, 60);
+    const age = job.startedAt === undefined ? "" : `（已运行 ${formatJobAge(now - job.startedAt)}）`;
+    const progress = job.progress?.trim()
+      ? ` · ${truncateForWeChat(job.progress.trim(), 40)}`
+      : "";
+    out.push(`    ▶ ${truncateForWeChat(`${kind} · ${label}`, 120)}${age}${progress}`.slice(0, 400));
+  }
+
+  const hidden = running.length - BACKGROUND_JOB_DETAIL_MAX;
+  if (hidden > 0) out.push(`    … 另有 ${hidden} 个运行中`);
   return out;
 }

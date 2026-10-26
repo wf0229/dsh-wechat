@@ -272,6 +272,47 @@ export interface AgentSessionLike {
   readonly seq: number;
 }
 
+// ─── Background jobs registry (ctx.jobs) ──────────────────────────────────
+
+/**
+ * Terminal + live states the host's `JobStatus` can hold. Declared as a plain
+ * string union here (not imported) so the bridge keeps its zero-runtime
+ * coupling to `@deepseek-ai/*`; the host's branded type is assignable to it.
+ */
+export type JobStatusView = "running" | "stopping" | "completed" | "killed" | "failed";
+
+/**
+ * One background job as `/status` reads it.
+ *
+ * The host `JobView` also carries `outputLimitBytes` and an `output` cursor
+ * record; neither is consumed here, and omitting them keeps this surface
+ * small. Everything else matches field-for-field.
+ */
+export interface JobViewLike {
+  readonly id: string;
+  readonly kind: string;
+  readonly label: string;
+  /** Session that owns the job; absent for a job started outside any session. */
+  readonly owner?: string;
+  readonly status: JobStatusView;
+  readonly progress?: string;
+  readonly detail?: string;
+  readonly startedAt: number;
+  readonly finishedAt?: number;
+}
+
+/**
+ * Structural surface of `ctx.jobs` (the abstract background job registry).
+ *
+ * Only `list` is declared: `/status` reports what is running, it never starts,
+ * reads, waits on or kills anything. `list(caller)` is owner-fenced by the
+ * host — a caller sees its own jobs plus unowned ones — which is why the
+ * bridge passes the bound session id rather than filtering a global list.
+ */
+export interface JobsService {
+  list(caller?: string): readonly JobViewLike[];
+}
+
 /**
  * One provider/model/effort selection as exposed by the host's
  * `modelSelection` projection. Unlike {@link ModelSelection} in `ops.ts`

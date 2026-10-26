@@ -178,7 +178,27 @@ export interface WeChatDSHConfig {
    * Both are pointers to the same saved file; neither inlines its content.
    */
   mediaAtRefEnabled: boolean;
+  /**
+   * How much of `/status`'s trailing 「会话级状态」 section to print.
+   *
+   *   - `"brief"` (default) — only `[模式]` (plan / goal / subagent / todos)
+   *     plus `[后台任务]` (this session's DSH background jobs). The usage /
+   *     session / other buckets are dropped: on a phone the four-bucket wall
+   *     is mostly numbers nobody asked for, and the two rows people actually
+   *     act on are "which mode am I in" and "what is still running".
+   *   - `"full"` — every bucket, exactly the pre-0.14 output, plus
+   *     `[后台任务]`.
+   *
+   * Scope is deliberately narrow: this changes ONLY the projection section at
+   * the END of `/status`. Every row above it (工作区 / 会话 / 模型 / 权限 / 各开关)
+   * is identical in both modes, so an operator can always read the state of the
+   * bridge itself without switching modes first.
+   */
+  statusMode: StatusMode;
 }
+
+/** See {@link WeChatDSHConfig.statusMode}. */
+export type StatusMode = "brief" | "full";
 
 /** Default WeChat surface prompt — injected as a runtime-context snapshot. */
 export const DEFAULT_SURFACE_PROMPT =
@@ -233,5 +253,9 @@ export function defaultConfig(): WeChatDSHConfig {
     // raw `@C:/…`. A path always reads correctly. The wording is the only thing
     // this switch changes — neither value inlines content.
     mediaAtRefEnabled: false,
+    // Brief by default: `/status` is read on a phone, and the two rows that
+    // actually change what the user does next are `[模式]` and `[后台任务]`.
+    // `full` is one `/status full` away and persists like every other switch.
+    statusMode: "brief",
   };
 }

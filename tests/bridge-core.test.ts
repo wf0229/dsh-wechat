@@ -48,9 +48,16 @@ describe("slash parsers", () => {
     expect(parseHelpCommand("help")).toBe(false);
   });
 
-  it("parseStatusCommand matches bare /status only", () => {
+  it("parseStatusCommand: bare reports, brief/full switch the detail level", () => {
     expect(parseStatusCommand("/status")).toEqual({ kind: "status" });
+    expect(parseStatusCommand("/status brief")).toEqual({ kind: "status", mode: "brief" });
+    expect(parseStatusCommand("/status full")).toEqual({ kind: "status", mode: "full" });
+    // Case and surrounding whitespace are tolerated, like every other toggle.
+    expect(parseStatusCommand("  /Status  FULL  ")).toEqual({ kind: "status", mode: "full" });
+    // Not a mode → still unparsed, so the usage hint answers instead of the
+    // bridge silently ignoring the argument.
     expect(parseStatusCommand("/status now")).toBeNull();
+    expect(parseStatusCommand("/status briefly")).toBeNull();
   });
 
   it("parseSilentCommand: bare → status, on/off/status subcommands", () => {

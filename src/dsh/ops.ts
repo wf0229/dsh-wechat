@@ -4,7 +4,7 @@
  * checks — no runtime imports of `@deepseek-ai/*` packages.
  */
 
-import type { Agent, AgentSession, AgentSessionLike, SessionProjectionService } from "./types.js";
+import type { Agent, AgentSession, AgentSessionLike, JobsService, SessionProjectionService } from "./types.js";
 import { modelSelectionFromProjection, sessionEvents } from "./types.js";
 import type { BridgeContext } from "./sessions.js";
 
@@ -1091,6 +1091,22 @@ export class DshOps {
    */
   sessionProjections(): SessionProjectionService | undefined {
     return this.get<SessionProjectionService>("sessionProjections");
+  }
+
+  // ─── Background jobs ───
+
+  /**
+   * The `ctx.jobs` background job registry (the `job_list` family's backing
+   * service). Returns `undefined` when the registry is not composed — a
+   * minimal headless profile has no jobs at all — and the caller then omits
+   * the `[后台任务]` block entirely rather than printing "未挂载".
+   *
+   * Reads are owner-fenced host-side: `list(caller)` yields the caller's jobs
+   * plus unowned ones, so `/status` passing the bound session id is already
+   * scoped to that session; other sessions' jobs are unreachable by design.
+   */
+  jobs(): JobsService | undefined {
+    return this.get<JobsService>("jobs");
   }
 
   /**

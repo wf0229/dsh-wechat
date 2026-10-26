@@ -534,6 +534,10 @@ window.__ModuleLoader__.load({
 					.filter((entry) => entry !== ""),
 				surfacePromptEnabled: !!form.surfacePromptEnabled,
 				surfacePrompt: form.surfacePrompt,
+				// A radio group has exactly two valid spellings; anything else
+				// (an older host's missing value) must not silently become
+				// "full" — the stored default is brief.
+				statusMode: form.statusMode === "full" ? "full" : "brief",
 			};
 		}
 
@@ -614,6 +618,7 @@ window.__ModuleLoader__.load({
 						maxOutgoingFileBytes: String(r.body.config?.maxOutgoingFileBytes ?? ""),
 						sendWechatRateLimitPerMinute: String(r.body.config?.sendWechatRateLimitPerMinute ?? ""),
 						allowedUsers: (r.body.config?.allowedUsers ?? []).join("\n"),
+						statusMode: r.body.config?.statusMode === "full" ? "full" : "brief",
 					});
 				}).catch(() => {});
 			}, []);
@@ -751,7 +756,7 @@ window.__ModuleLoader__.load({
 					: "已关闭 · 每条消息各自一轮")
 				: "";
 			const deliverySummary = form
-				? `静默 ${onOff(form.silent)} · 结论 ${onOff(form.finalOnly)} · 决策推送 ${onOff(form.crossSessionNotify)} · 任务提醒 ${onOff(form.notifyTaskEvents)}`
+				? `静默 ${onOff(form.silent)} · 结论 ${onOff(form.finalOnly)} · 决策推送 ${onOff(form.crossSessionNotify)} · 任务提醒 ${onOff(form.notifyTaskEvents)} · 状态 ${form.statusMode === "full" ? "详细" : "简洁"}`
 				: "";
 			const mediaSummary = form
 				? (form.mediaMergeEnabled
@@ -874,7 +879,7 @@ window.__ModuleLoader__.load({
 							id: "delivery",
 							title: "消息推送",
 							summary: deliverySummary,
-							desc: "决定微信里出现多少内容、什么时候出现。想安静一点，先关「静默」不够就开「结论模式」。",
+							desc: "决定微信里出现多少内容、什么时候出现。想安静一点，先关「静默」不够就开「结论模式」。`/status` 的详细程度也在这一组。",
 							open: isOpen("delivery"),
 							onToggle: toggleGroup,
 						},
@@ -895,6 +900,24 @@ window.__ModuleLoader__.load({
 									createElement("input", { type: "checkbox", checked: !!form?.finalOnly, onChange: (e) => setForm({ ...form, finalOnly: e.target.checked }) }),
 									createElement("span", null, "结论模式"),
 									createElement(HelpTip, { text: "整件事彻底做完，只发一条最终结论；中间自动续跑再多轮也只发一条。权限卡、提问卡、报错照样立刻发，不会被压住。它停手 45 秒后交付，最长 10 分钟一定发一次；等不及就发 /flush 立刻取回。打开后比「静默」更强。微信端也能用 /final on|off 切换，和这里同一个值。" })),
+							),
+							// `/status` 的详细程度：只影响末尾「会话级状态」那一段，
+							// 上面的工作区/会话/模型/权限等行两种模式完全一样。
+							// 用单选而不是勾选，因为这是「二选一」而不是「开关」。
+							createElement("div", { className: "wx_sub" },
+								createElement("div", { className: "wx_field_label" }, "状态详细程度",
+									createElement("code", { className: "wx_key" }, "statusMode"),
+									createElement(HelpTip, { text: "微信发 /status 时，末尾「会话级状态」显示多少。选「简洁」只显示 [模式]（plan / goal 等）和 [后台任务]（这个会话还在跑的后台任务，没有就整段不出现）；选「详细」把用量、会话、其它几段也全列出来。默认简洁。上面的工作区、会话、模型、权限、各开关状态两种模式都一样。微信端也能用 /status brief|full 切换，和这里同一个值。" })),
+								createElement("div", { className: "wx_toggles" },
+									createElement("label", { className: "wx_check" },
+										createElement("input", { type: "radio", name: "statusMode", checked: form?.statusMode !== "full", onChange: () => setForm({ ...form, statusMode: "brief" }) }),
+										createElement("span", null, "简洁"),
+										createElement(HelpTip, { text: "只显示 [模式] 和 [后台任务]。手机上看得完，日常推荐。" })),
+									createElement("label", { className: "wx_check" },
+										createElement("input", { type: "radio", name: "statusMode", checked: form?.statusMode === "full", onChange: () => setForm({ ...form, statusMode: "full" }) }),
+										createElement("span", null, "详细"),
+										createElement(HelpTip, { text: "把 [用量与统计]、[会话]、[其它] 也全部列出来。想一次看全 token 用量、标题、权限这些细节时选它。" })),
+								),
 							),
 						),
 

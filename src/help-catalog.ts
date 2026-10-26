@@ -161,12 +161,14 @@ const COMMANDS: HelpCommandEntry[] = [
     id: "status",
     command: "/status",
     aliases: [],
-    summary: "查看当前状态",
-    usage: "/status",
-    subcommands: [],
+    summary: "查看当前状态，可切简洁或详细",
+    usage: "/status [brief|full]",
+    subcommands: ["brief", "full"],
     group: "basics",
     examples: [
-      { line: "/status", note: "项目、会话、模型、权限、待处理卡片" },
+      { line: "/status", note: "当前状态（按设置显示简洁或详细）" },
+      { line: "/status brief", note: "只显示 [模式] 和 [后台任务]" },
+      { line: "/status full", note: "会话级状态四段全显示" },
     ],
   },
   {

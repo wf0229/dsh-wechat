@@ -64,6 +64,7 @@ import {
   parseCommandName,
   parseHelpCommand,
   parseHistoryCommand,
+  renderBackgroundJobsSection,
   renderProjectionSection,
   parseEnterCommand,
   parseFinalCommand,
@@ -91,6 +92,7 @@ import {
   LIST_DEFAULT,
   LOCAL_COMMAND_NAMES,
   type AtCommand,
+  type BackgroundJobView,
   type EnterCommand,
   type FinalCommand,
   type HistoryCommand,
@@ -1951,6 +1953,22 @@ export class WeChatDSHBridge {
 
       const status = parseStatusCommand(text);
       if (status) {
+        // `/status brief|full` is a switch, not a report: it persists exactly
+        // like `/silent on|off` (config.json, so a re-scan keeps it) and then
+        // answers with the NEW rendering, so the user sees the effect without
+        // sending a second command.
+        if (status.mode) {
+          this.persistEditable({ statusMode: status.mode });
+          const confirmation = status.mode === "brief"
+            ? "✅ /status 已切换为简洁：只显示 [模式] 和 [后台任务]（设置页「状态详细程度」同款，写入 config.json）"
+            : "✅ /status 已切换为详细：会话级状态四段全出，并加 [后台任务]（设置页「状态详细程度」同款，写入 config.json）";
+          await this.sendReply(
+            userId,
+            `${confirmation}\n\n${await this.formatStatus(user)}`,
+            { parkOnError: false },
+          );
+          return;
+        }
         await this.sendReply(userId, await this.formatStatus(user), { parkOnError: false });
         return;
       }
@@ -4513,7 +4531,7 @@ export class WeChatDSHBridge {
           return;
         }
         const restored = await this.switchUserWorkspace(user, ws.path);
-        await this.sendReply(userId, await this.formatWorkspaceSwitchReply("已添加并切换到工作区", ws.title, ws.path, restored));
+        await this.sendReply(userId, await this.formatWorkspaceSwitchReply(user, "已添加并切换到工作区", ws.title, ws.path, restored));
         return;
       }
       case "switch": {
@@ -4538,7 +4556,7 @@ export class WeChatDSHBridge {
           return;
         }
         const restored = await this.switchUserWorkspace(user, ws.path);
-        await this.sendReply(userId, await this.formatWorkspaceSwitchReply("已切换到工作区", ws.title, ws.path, restored));
+        await this.sendReply(userId, await this.formatWorkspaceSwitchReply(user, "已切换到工作区", ws.title, ws.path, restored));
         return;
       }
     }
@@ -4569,6 +4587,7 @@ export class WeChatDSHBridge {
 
   /** Two-line workspace switch/add reply: workspace row + restored session. */
   private async formatWorkspaceSwitchReply(
+    user: UserState,
     verb: string,
     title: string,
     path: string,
@@ -4578,7 +4597,10 @@ export class WeChatDSHBridge {
     if (!sessionId) {
       return `${head}\n💬 该工作区暂无会话，发送消息将创建`;
     }
-    return `${head}\n💬 已恢复会话: ${await this.formatSessionLabel(sessionId, path)}`;
+    // Switching workspace rebinds the session, so it rebinds the preset/model/
+    // effort too — same line as `/s switch` and `/s new`.
+    const profile = await this.formatSessionProfileLine(user, this.agents.get(user));
+    return `${head}\n💬 已恢复会话: ${await this.formatSessionLabel(sessionId, path)}\n${profile}`;
   }
 
   /**
@@ -4797,11 +4819,15 @@ export class WeChatDSHBridge {
         // replacement instead of silently swapping ids on switch.
         const { agent } = await this.agents.ensure(user);
         const label = await this.formatSessionLabel(record.header.id, record.header.cwd);
+        // The profile line answers "what am I now running?" — the question a
+        // switch raises. Without it the user has to send /status (or two more
+        // commands) just to learn the preset/model/effort they landed on.
+        const profile = await this.formatSessionProfileLine(user, agent);
         await this.sendReply(
           userId,
           agent
-            ? `✅ 已切换到会话 ${label} — ${record.header.cwd ?? "?"}，Agent ${agent.status}。`
-            : `⚠️ 已切换到会话 ${label} — ${record.header.cwd ?? "?"}，但该会话无法恢复（日志可能已损坏）。发送 /s new 新建，或换一条会话。`,
+            ? `✅ 已切换到会话 ${label} — ${record.header.cwd ?? "?"}，Agent ${agent.status}。\n${profile}`
+            : `⚠️ 已切换到会话 ${label} — ${record.header.cwd ?? "?"}，但该会话无法恢复（日志可能已损坏）。发送 /s new 新建，或换一条会话。\n${profile}`,
         );
         // Flush any pending cards for the session just switched into
         // (notified earlier, or silently when nothing was pending).
@@ -4824,7 +4850,11 @@ export class WeChatDSHBridge {
           const current = await this.ops.inspectSessionActivity(user.sessionId, user.cwd);
           if (current.ok && current.lastUserMessageTime === undefined) {
             const agent = this.agents.get(user);
-            await this.sendReply(userId, `✅ 已在空白会话（${user.sessionId.slice(0, 12)}）${agent ? `，Agent ${agent.status}` : ""}。`);
+            const profile = await this.formatSessionProfileLine(user, agent);
+            await this.sendReply(
+              userId,
+              `✅ 已在空白会话（${user.sessionId.slice(0, 12)}）${agent ? `，Agent ${agent.status}` : ""}。\n${profile}`,
+            );
             return;
           }
           if (!current.ok) {
@@ -4844,15 +4874,20 @@ export class WeChatDSHBridge {
           const { agent } = await this.agents.ensure(user, { replaceOnResumeFailure: true });
           this.persistSessionBinding(user);
           if (agent && user.sessionId === blank) {
-            await this.sendReply(userId, `✅ 已复用空白会话 ${blank.slice(0, 12)}（${user.cwd}），Agent ${agent.status}。`);
+            const profile = await this.formatSessionProfileLine(user, agent);
+            await this.sendReply(
+              userId,
+              `✅ 已复用空白会话 ${blank.slice(0, 12)}（${user.cwd}），Agent ${agent.status}。\n${profile}`,
+            );
             return;
           }
           // Reuse target itself failed to load; ensure() already minted a
           // replacement when replaceOnResumeFailure is on.
+          const recovered = agent ? await this.formatSessionProfileLine(user, agent) : "";
           await this.sendReply(
             userId,
             agent
-              ? `⚠️ 空白会话 ${blank} 无法恢复；已新建会话 ${user.sessionId}（${user.cwd}）。`
+              ? `⚠️ 空白会话 ${blank} 无法恢复；已新建会话 ${user.sessionId}（${user.cwd}）。\n${recovered}`
               : `⚠️ 空白会话 ${blank} 无法恢复，且新建会话失败。请检查 DSH 日志。`,
           );
           return;
@@ -5009,7 +5044,12 @@ export class WeChatDSHBridge {
       return;
     }
     const head = wording?.success ?? "✅ 已创建新会话";
-    await this.sendReply(userId, `${head} ${user.sessionId}（${user.cwd}），Agent 就绪。`);
+    // A brand-new session inherits the deployment defaults, so this line is
+    // exactly what the first turn will run on — the user should not have to
+    // ask /status (or /preset status + /model status + /reasoning status) to
+    // find out which preset/model/effort they just landed on.
+    const profile = await this.formatSessionProfileLine(user, agent);
+    await this.sendReply(userId, `${head} ${user.sessionId}（${user.cwd}），Agent 就绪。\n${profile}`);
   }
 
   /**
@@ -6431,8 +6471,10 @@ export class WeChatDSHBridge {
       // logs only ever carry the masked form.
       `• 入站白名单: ${this.describeAllowlist(user.userId)}`,
       // Audit trail location: the trail exists for the operator, who has to be
-      // able to find it without reading the source.
-      `• 审计日志: ${this.audit.path()}（按 1 MiB 轮转为 .1）`,
+      // able to find it without reading the source. The rotation policy is
+      // documented in DEVELOPMENT.md — repeating it on every `/status` was
+      // noise on a phone, and the path alone is what a reader acts on.
+      `• 审计日志: ${this.audit.path()}`,
       // 跨会话决策推送 on = extra delivery enabled (good); off = quiet (neutral).
       `• 跨会话决策推送: ${this.paintBadge(crossEffective, crossEffective === "on" ? "positive" : "neutral")}`,
       `• 跨会话任务完成提醒: ${this.paintBadge(this.notifyTaskEventsEnabled() ? "on" : "off", this.notifyTaskEventsEnabled() ? "positive" : "neutral")}`,
@@ -6446,6 +6488,11 @@ export class WeChatDSHBridge {
     // each known key with a purpose-built smart formatter, and falls
     // back to JSON for unknown keys — DSH adds new plugins → WeChat
     // lights up new rows under `[其它]` with zero bridge change.
+    //
+    // `config.statusMode` decides how many buckets are printed: `brief`
+    // (default) keeps only `[模式]`, `full` prints all four. The rows above
+    // this section are identical in both modes.
+    let sectionLines: string[] = [];
     if (agent && agent.session) {
       const proj = this.ops.sessionProjections();
       if (proj) {
@@ -6456,17 +6503,95 @@ export class WeChatDSHBridge {
           // is structurally compatible with `AgentSessionLike` at
           // runtime.
           const { values } = proj.snapshot(agent.session as never);
-          const sectionLines = renderProjectionSection(values);
-          if (sectionLines.length > 0) {
-            lines.push("", "── 会话级状态 ──", ...sectionLines);
-          }
+          sectionLines = renderProjectionSection(values, { mode: this.config.statusMode });
         } catch (err) {
           console.warn(`[dsh-wechat] sessionProjections.snapshot failed: ${String(err)}`);
         }
       }
     }
 
+    // `[后台任务]` — THIS session's DSH background jobs. Printed in both modes
+    // because "something is still running" changes what the user does next, and
+    // a failed projection read must not hide it: the two reads are independent
+    // on purpose.
+    //
+    // Both "no jobs at all" and "could not ask" produce no lines, so the banner
+    // never appears just to say `共 0 个`.
+    const jobs = this.collectBackgroundJobs(user);
+    const jobLines = jobs === undefined ? [] : renderBackgroundJobsSection(jobs);
+
+    const section = [
+      ...sectionLines,
+      ...(sectionLines.length > 0 && jobLines.length > 0 ? [""] : []),
+      ...jobLines,
+    ];
+    if (section.length > 0) {
+      lines.push("", "── 会话级状态 ──", ...section);
+    }
+
     return lines.join("\n");
+  }
+
+  /**
+   * This session's DSH background jobs, for `/status`'s `[后台任务]` block.
+   *
+   * Scope is deliberately narrow: the caller's OWN session only.
+   *
+   *   - No bound session → `undefined`, and `jobs.list` is not called at all
+   *     (there is no owner to ask about).
+   *   - No `ctx.jobs` service → `undefined`, so the block is omitted rather
+   *     than printing "未挂载".
+   *   - The read throwing → `undefined` (plus one warn): `/status` must never
+   *     fail over a diagnostic row, and a failed read must not be reported as
+   *     "0 jobs".
+   *   - A successful read with nothing in it → `[]`, which renders as no block:
+   *     "nothing is running" needs no banner.
+   *
+   * `list(sessionId)` is owner-fenced host-side (the caller's jobs plus
+   * unowned ones), and the result is filtered to `owner === sessionId` anyway:
+   * an unowned job belongs to no conversation, so counting it would put
+   * another surface's work in this user's `/status`.
+   */
+  private collectBackgroundJobs(user: UserState): BackgroundJobView[] | undefined {
+    const sessionId = user.sessionId;
+    if (!sessionId) return undefined;
+    const jobs = this.ops.jobs();
+    if (!jobs) return undefined;
+
+    let listed: readonly unknown[];
+    try {
+      listed = jobs.list(sessionId);
+    } catch (err) {
+      console.warn(`[dsh-wechat] jobs.list(${maskUserId(sessionId)}) failed: ${String(err)}`);
+      return undefined;
+    }
+    if (!Array.isArray(listed)) return undefined;
+
+    const out: BackgroundJobView[] = [];
+    for (const raw of listed) {
+      if (!raw || typeof raw !== "object") continue;
+      const job = raw as {
+        id?: unknown;
+        kind?: unknown;
+        label?: unknown;
+        owner?: unknown;
+        status?: unknown;
+        progress?: unknown;
+        startedAt?: unknown;
+      };
+      if (typeof job.id !== "string" || !job.id) continue;
+      // Owner fence, second pass: keep only jobs this session owns.
+      if (job.owner !== sessionId) continue;
+      out.push({
+        id: job.id,
+        kind: typeof job.kind === "string" ? job.kind : "job",
+        label: typeof job.label === "string" ? job.label : job.id,
+        status: typeof job.status === "string" ? job.status : "unknown",
+        ...(typeof job.progress === "string" ? { progress: job.progress } : {}),
+        ...(typeof job.startedAt === "number" ? { startedAt: job.startedAt } : {}),
+      });
+    }
+    return out;
   }
 
   /**
@@ -6474,11 +6599,15 @@ export class WeChatDSHBridge {
    * so explicitly — "first contact wins" is a security-relevant state and must
    * be visible; when it is set, the bound peer's OWN id is printed in full so
    * the owner never has to discover their id elsewhere to edit the list.
+   *
+   * The empty case used to spell the rule out in parentheses; the 🔴 `关` badge
+   * already says the list is off, and the rule itself is documented in
+   * DEVELOPMENT.md. One word keeps the security signal without the paragraph.
    */
   private describeAllowlist(ownUserId: string): string {
     const allowed = this.config.allowedUsers;
     if (allowed.length === 0) {
-      return this.paintBadge("关（首位给你发消息的人会成为绑定对端）", "warning");
+      return this.paintBadge("关", "warning");
     }
     const own = allowed.includes(ownUserId) ? " ◀ 当前绑定" : "";
     return `${allowed.join(", ")}${own}（其他人发消息会被忽略，不回复）`;
@@ -6509,6 +6638,50 @@ export class WeChatDSHBridge {
     if (questions > 0) parts.push(`${questions} 张提问卡`);
     if (approvals > 0) parts.push(`${approvals} 张权限卡`);
     return parts.length > 0 ? parts.join(" · ") : undefined;
+  }
+
+  /**
+   * One-line "what this session is running on" summary for the switch/new
+   * replies: preset · model · reasoning effort.
+   *
+   * A switch or `/s new` changes the answers to exactly these three questions,
+   * so the reply answers them instead of making the user send `/status`
+   * (or `/preset status` + `/model status` + `/reasoning status`) to find out.
+   * Each part degrades independently — a missing preset roster, a host without
+   * `llm`, or an unresolvable effort name never blanks the whole line.
+   */
+  private async formatSessionProfileLine(user: UserState, agent: Agent | undefined): Promise<string> {
+    // Preset: the session's own live value (event-aware, same source as
+    // `/status`'s 「当前会话 Preset」), falling back to the deployment default —
+    // a brand-new session has no `agent-preset/selected` event yet, and the
+    // default is exactly what it will run on.
+    const livePreset = user.sessionId
+      ? await this.ops.resolveSessionPreset(user.sessionId, user.cwd)
+      : undefined;
+    const presetId = livePreset ?? this.ops.defaultPresetId();
+    const presetLabel = (await this.resolvePresetLabel(presetId)) ?? "（未设置）";
+
+    const active = this.resolveEffectiveModel(user, agent);
+    const modelLabel =
+      active?.provider && active.model ? `${active.provider}/${active.model}` : "（默认）";
+
+    // Effort name comes from the adapter's own roster, so `high` reads as the
+    // localized name the user picked in `/reasoning list`; an unset effort is
+    // the model default, not "unknown".
+    let effortLabel = "默认";
+    if (active?.reasoningEffort) {
+      const reasoning =
+        active.provider && active.model
+          ? await this.ops.resolveModelReasoning(active.provider, active.model)
+          : undefined;
+      const level = reasoning?.efforts.find((e) => e.id === active.reasoningEffort);
+      effortLabel = level?.name ?? active.reasoningEffort;
+    }
+
+    // "思考等级" rather than the shorter "思考": WeChat already streams the
+    // model's reasoning as 「🧠 思考 · …」, so the bare word would read as that
+    // content instead of the effort setting.
+    return `• 预设: ${presetLabel} · 模型: ${modelLabel} · 思考等级: ${effortLabel}`;
   }
 
   /**

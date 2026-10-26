@@ -458,8 +458,50 @@ describe("ConfigStore", () => {
     }
   });
 
-  it("drops keys this version no longer knows instead of round-tripping them", () => {
+  it("persists statusMode as an enum and rejects anything else", () => {
+    // `statusMode` is not a boolean: it has exactly two spellings, and a
+    // hand-edited `"verbose"` must not reach `/status` as an unknown mode
+    // (which every comparison would read as "not brief", i.e. silently full).
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      const store = new ConfigStore(dir);
+      expect(store.update({ statusMode: "full" }).statusMode).toBe("full");
+      expect(new ConfigStore(dir).stored().statusMode).toBe("full");
+
+      // Junk is refused rather than persisted, so the previous value stays.
+      expect(store.update({ statusMode: "verbose" as never }).statusMode).toBe("full");
+      expect(store.update({ statusMode: 42 as never }).statusMode).toBe("full");
+      expect(store.update({ statusMode: null as never }).statusMode).toBe("full");
+
+      // And back to brief.
+      expect(store.update({ statusMode: "brief" }).statusMode).toBe("brief");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults statusMode to brief and sanitises a hand-edited file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
+    try {
+      expect(defaultConfig().statusMode).toBe("brief");
+
+      fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({
+        statusMode: "verbose",
+        silent: true,
+      }), "utf-8");
+      const store = new ConfigStore(dir);
+      // Dropped on load, so the built-in default applies.
+      expect(store.stored()).toEqual({ silent: true });
+      expect(store.resolve(defaultConfig()).statusMode).toBe("brief");
+
+      fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ statusMode: "full" }), "utf-8");
+      expect(new ConfigStore(dir).resolve(defaultConfig()).statusMode).toBe("full");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("drops keys this version no longer knows instead of round-tripping them", () => {    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-wechat-cfg-"));
     try {
       fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({
         // A switch from a hypothetical other version: unknown here, so it must

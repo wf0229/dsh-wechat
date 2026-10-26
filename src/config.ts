@@ -195,6 +195,28 @@ export interface WeChatDSHConfig {
    * bridge itself without switching modes first.
    */
   statusMode: StatusMode;
+  /**
+   * 强制透传 (`/raw on`)：跳过网关的全部拦截。
+   *
+   * While this is ON, every inbound message goes to the agent VERBATIM — no
+   * slash parsing, no native command dispatch, no unknown-command hint, no
+   * mistyped-command usage reply, and no `/help`. It exists for the case where
+   * the user wants the model itself to receive a `/whatever` line: a prompt
+   * being pasted, a command grammar the bridge does not own, or a directive an
+   * agent preset expects to read.
+   *
+   * The single exception is `/raw` itself (any form), which stays a command —
+   * a switch that cannot be turned off from the chat would be a trap.
+   *
+   * `/raw once` arms a one-shot instead: the next message passes through and
+   * the switch turns itself off, so a one-off paste never leaves the bridge in
+   * a mode where it has quietly stopped answering commands.
+   *
+   * Default off, and NOT persisted to `config.json`: a re-scan or a restart
+   * must not resume passthrough, because the operator who restarts the plugin
+   * has no way to know the bot is currently deaf to commands.
+   */
+  passthrough: boolean;
 }
 
 /** See {@link WeChatDSHConfig.statusMode}. */
@@ -257,5 +279,8 @@ export function defaultConfig(): WeChatDSHConfig {
     // actually change what the user does next are `[模式]` and `[后台任务]`.
     // `full` is one `/status full` away and persists like every other switch.
     statusMode: "brief",
+    // Passthrough never survives a restart (it is not in EDITABLE_KEYS), so a
+    // bridge that just came up always answers commands first.
+    passthrough: false,
   };
 }

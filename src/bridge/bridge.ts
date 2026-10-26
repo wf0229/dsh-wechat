@@ -84,6 +84,7 @@ import {
   parseRejectQuestionCommand,
   parseSessionCommand,
   parseSilentCommand,
+  parseRawCommand,
   parseSurfaceCommand,
   parseStatusCommand,
   parseStopCommand,
@@ -100,6 +101,7 @@ import {
   type MediaCommand,
   type ModelCommand,
   type NotifyCommand,
+  type RawCommand,
   type SurfaceCommand,
   type PermCommand,
   type PresetCommand,
@@ -593,6 +595,14 @@ export class WeChatDSHBridge {
   private readonly pendingFinal = new Map<string, PendingFinal>();
   /** One global queue and budget: dsh-wechat intentionally serves one peer. */
   private outboundCache: CachedMessage[] = [];
+  /**
+   * `/raw once` armed a single-message passthrough.
+   *
+   * Kept separate from `config.passthrough` so "pass this ONE line through"
+   * cannot be confused with "stop answering commands from now on": the flag
+   * clears itself on the next message, while the config switch is a mode.
+   */
+  private passthroughOnceArmed = false;
   private wechatMsgCount = 0;
   private cacheNoticeSent = false;
   /** Sliding-window limiter for agent-initiated `send_wechat` pushes. */
@@ -1795,9 +1805,18 @@ export class WeChatDSHBridge {
     // plausibly own; the dsh-wechat-owned `/rp`/`/rq`/`/stop` semantics
     // are kept off this branch so the card handler retains its meaning
     // even when the native registry happens to be composed.
+    //
+    // `isBypassSlashCommand` also covers a MISTYPED line for a command this
+    // bridge owns (`/s lsit`): that is a command attempt, never the card's
+    // free-text answer, and `handleMessage` answers it with the usage line.
+    //
+    // 强制透传 outranks every card branch: "完全不拦截" would be a lie if a
+    // pending question could still claim the message as its answer. The card
+    // stays pending (it is not rejected) — the passthrough simply goes past it.
     const bypassCard =
-      text !== "" &&
-      (isBypassSlashCommand(text) || this.isBypassableNativeCommand(text));
+      this.passthroughActive() ||
+      (text !== "" &&
+        (isBypassSlashCommand(text) || this.isBypassableNativeCommand(text)));
 
     // Answerable cards: current session always; other sessions only while
     // the decision gate is on. A lone background card must not swallow a
@@ -1855,6 +1874,29 @@ export class WeChatDSHBridge {
     });
 
     if (text) {
+      // `/raw` is answered BEFORE passthrough takes effect, and it is the ONLY
+      // command that still works while passthrough is on. Everything else —
+      // native dispatch, `/help`, every local parser, the usage replies and the
+      // unknown-command hint — stands down below.
+      const rawCmd = parseRawCommand(text);
+      if (rawCmd) {
+        await this.handleRawCommand(userId, rawCmd);
+        return;
+      }
+      // 强制透传: the user asked for the gateway to stop intercepting. Every
+      // remaining branch in this method is an interceptor, so the whole block
+      // is skipped and the message goes to `enqueueInbound` verbatim.
+      //
+      // This deliberately outranks `isNext` and the native registry: a native
+      // command is still an interception, and "完全不拦截" means the model sees
+      // the line, not a handler.
+      if (this.passthroughActive()) {
+        this.consumePassthroughOnce();
+        this.log(`passthrough: forwarding verbatim (${text.trim().split(/\s+/)[0] ?? ""})`);
+        await this.enqueueInbound(user, msg);
+        return;
+      }
+
       // One audit line per slash command (name only — never its arguments,
       // which can carry a path, a preset name or an answer).
       if (text.trim().startsWith("/")) {
@@ -2043,7 +2085,7 @@ export class WeChatDSHBridge {
       if (isAtCommandAttempt(text)) {
         await this.sendReply(
           userId,
-          "⚠️ 用法: /at [s <编号|关键词> | f <路径> | rm <编号> | clear]\n发送 /at 查看已暂存的引用。",
+          "⚠️ 用法: /at [s <编号|关键词> | f <路径> | rm <编号> | clear]\n发送 /at 查看已暂存的引用。这条消息没有转发给 agent。",
         );
         return;
       }
@@ -2051,24 +2093,35 @@ export class WeChatDSHBridge {
       if (isHistoryCommandAttempt(text)) {
         await this.sendReply(
           userId,
-          `⚠️ 用法: /history [all] [数量]（1-${HISTORY_MAX}，默认 5）例如 /history 10 或 /history all`,
+          `⚠️ 用法: /history [all] [数量]（1-${HISTORY_MAX}，默认 5）例如 /history 10 或 /history all。这条消息没有转发给 agent。`,
         );
         return;
       }
 
-      // A documented command whose ARGUMENT did not parse gets its usage line,
-      // not "未知命令": `/model foo` names a command `/help` prints, so calling
-      // it unknown contradicts the listing. The text still goes to the agent —
-      // this is a hint, not a refusal.
+      // A command this bridge OWNS whose line did not parse — a mistyped
+      // subcommand (`/s lsit`), a bad argument (`/model foo`), a missing space
+      // (`/workspacelist`) — gets its usage line and STOPS here.
+      //
+      // Forwarding it used to be the bug: the agent answered a sentence the
+      // user never meant to say, the wrong command landed in the transcript,
+      // and every later turn had to work around it. A leading slash is not an
+      // accident — the user is addressing a command, so the bridge answers the
+      // command (`/help` and `/at` have always worked this way). Only a name
+      // NOBODY owns (`/plan`, `/nope`) still reaches the agent or the native
+      // registry.
       const usageHint = commandUsageHint(text);
       if (usageHint) {
         await this.sendReply(userId, usageHint);
-      } else {
-        // Unrecognized slash command — hint, then forward to the agent.
-        const slashHint = detectUnknownSlashCommand(text);
-        if (slashHint) {
-          await this.sendReply(userId, `⚠️ 未知命令 ${slashHint}，已作为文本转发给 agent。发送 /help 查看可用命令。`);
-        }
+        return;
+      }
+      // Unrecognized slash command — hint, then forward to the agent. The
+      // forward is deliberate: a registered NATIVE command
+      // (`/plan`, `/goal`, `/compact`) is only dispatched when
+      // `tryNativeCommand` found it, so an unregistered `/xxx` may still be a
+      // prompt the user wants understood.
+      const slashHint = detectUnknownSlashCommand(text);
+      if (slashHint) {
+        await this.sendReply(userId, `⚠️ 未知命令 ${slashHint}，已作为文本转发给 agent。发送 /help 查看可用命令。`);
       }
     }
 
@@ -4257,6 +4310,85 @@ export class WeChatDSHBridge {
     } catch (err) {
       this.log(`persist config failed: ${String(err)}`);
     }
+  }
+
+  // ─── 强制透传 (/raw) ───
+
+  /**
+   * True when inbound text must skip the whole command layer.
+   *
+   * Both the sticky switch (`/raw on`) and the armed one-shot (`/raw once`)
+   * answer yes; they differ only in what happens AFTER forwarding — see
+   * {@link consumePassthroughOnce}.
+   */
+  private passthroughActive(): boolean {
+    return this.config.passthrough === true || this.passthroughOnceArmed;
+  }
+
+  /**
+   * Spend an armed `/raw once`.
+   *
+   * Called after the message was handed to `enqueueInbound`, never before: a
+   * throw in the forwarding path must not silently swallow the user's only
+   * passthrough. The sticky switch is untouched — only the one-shot clears.
+   */
+  private consumePassthroughOnce(): void {
+    if (!this.passthroughOnceArmed) return;
+    this.passthroughOnceArmed = false;
+    this.log("passthrough: one-shot spent (next message is a command again)");
+  }
+
+  /**
+   * `/raw` — 强制透传.
+   *
+   * While on, the bridge stops being a gateway in front of the model: every
+   * message is forwarded verbatim, slash prefix included. That is what makes
+   * it useful (pasting a `/whatever` prompt the model — not the bridge — should
+   * read) and what makes it dangerous (commands stop working), so:
+   *
+   *   - it is never persisted: a restart always comes up with interceptors on,
+   *     because an operator restarting the plugin cannot know the bot is deaf;
+   *   - `/raw` itself stays a command even while on — a switch with no way out
+   *     from the chat is a trap;
+   *   - `once` exists for the common "just this one line" case.
+   */
+  private async handleRawCommand(userId: string, cmd: RawCommand): Promise<void> {
+    if (cmd.mode === "on") {
+      this.passthroughOnceArmed = false;
+      this.config.passthrough = true;
+      this.log("passthrough: ON — commands are no longer intercepted");
+      await this.sendReply(
+        userId,
+        "🔓 强制透传已开启：之后每条消息（包括 /xxx 命令）都原样转给 agent，网关不再拦截。\n"
+          + "只有 /raw 本身仍有效——发 /raw off 关闭，/raw once 只透传下一条。\n"
+          + "注意：重启插件后自动关闭。",
+      );
+      return;
+    }
+    if (cmd.mode === "off") {
+      const wasOn = this.config.passthrough === true || this.passthroughOnceArmed;
+      this.config.passthrough = false;
+      this.passthroughOnceArmed = false;
+      await this.sendReply(
+        userId,
+        wasOn
+          ? "🔒 强制透传已关闭：斜杠命令恢复由网关处理，普通文本照常转给 agent。"
+          : "强制透传本来就是关闭的：斜杠命令由网关处理。",
+      );
+      return;
+    }
+    if (cmd.mode === "once") {
+      this.config.passthrough = false;
+      this.passthroughOnceArmed = true;
+      this.log("passthrough: armed for the next message only");
+      await this.sendReply(
+        userId,
+        "🔓 下一条消息将原样转给 agent（含 /xxx），之后自动恢复拦截。",
+      );
+      return;
+    }
+    await this.sendReply(userId, `强制透传: ${this.passthroughActive() ? "on" : "off"}`
+      + "（/raw on|off|once 切换；开启期间只有 /raw 本身仍被拦截）");
   }
 
   private async handleSurfaceCommand(userId: string, cmd: SurfaceCommand): Promise<void> {
@@ -6454,6 +6586,15 @@ export class WeChatDSHBridge {
         ? [`• 结论模式: ${this.paintBadge(`on（暂存 ${this.pendingFinal.size}）`, "positive")}`]
         : [`• 结论模式: ${this.paintBadge("off", "neutral")}`]),
       `• 微信提示词: ${this.paintBadge(this.config.surfacePromptEnabled ? "on" : "off", this.config.surfacePromptEnabled ? "positive" : "neutral")}`,
+      // 强制透传 on = the gateway stops intercepting commands, which is
+      // precisely the state a user must never be surprised by — so the row is
+      // warning-coloured, and it also shows an armed `/raw once`.
+      ...(this.passthroughActive()
+        ? [`• 强制透传: ${this.paintBadge(
+          this.config.passthrough === true ? "on（命令不再拦截）" : "once（下一条）",
+          "warning",
+        )}`]
+        : []),
       `• 繁忙投递: ${this.ops.busyEnter() === "steer" ? this.paintBadge("steer（插话）", "positive") : this.paintBadge("queue（排队）", "neutral")}`,
       // 打字合并 (F1) — shows the live parameters AND the buffered count, so
       // the window is never a black box the user has to guess about.

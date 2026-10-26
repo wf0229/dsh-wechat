@@ -427,6 +427,23 @@ const COMMANDS: HelpCommandEntry[] = [
     ],
   },
 
+  {
+    id: "raw",
+    command: "/raw",
+    aliases: [],
+    summary: "强制透传：斜杠命令和文本原样交给 agent",
+    usage: "/raw on|off|once|status（透传期间只有 /raw 本身仍被拦截）",
+    subcommands: ["on", "off", "once", "status"],
+    group: "pacing",
+    examples: [
+      { line: "/raw on", note: "开启：之后每条消息都原样转发，网关不拦截" },
+      { line: "/raw once", note: "只透传下一条，然后自动关闭" },
+      { line: "/raw off", note: "关闭（透传期间这条仍有效）" },
+      { line: "/raw", note: "查看当前是否在透传" },
+      { line: "/raw status", note: "同上" },
+    ],
+  },
+
   // ── 引用与回看 ───────────────────────────────────────────────────────────
   {
     id: "at",

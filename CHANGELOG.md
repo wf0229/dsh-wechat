@@ -7,6 +7,17 @@
 
 ### Added
 
+- **`/raw`：强制透传，网关完全不拦截。** 开启后每条消息——包括 `/xxx` 斜杠命令和紧跟在后面的文本——都原样转给 agent，bridge 不再接管：原生命令注册中心、本地命令表、`/help`、用法提示、未知命令提示、待处理卡片全部让开。用于「这一行 `/whatever` 我就是要让模型自己看」的场景（粘贴提示词、agent preset 自己的指令语法、bridge 不拥有的命令文法）。
+
+  ```
+  /raw on      # 之后每条消息都原样转发，斜杠前缀保留
+  /raw once    # 只透传下一条，然后自动关闭
+  /raw off     # 关闭
+  /raw         # 查看当前是否在透传（同 /raw status）
+  ```
+
+  三个刻意的边界：**①透传期间 `/raw` 本身仍然有效**——开关如果在聊天里关不掉就是陷阱；**②不写入 `config.json`、重启必然关闭**——运维重启插件时无法知道机器人当前是不是聋的；**③`/raw once` 用完自动回位**——常见需求是「就这一行」，留着一个「机器人不再响应命令」的模式是隐患。`/status` 在开启时多一行 `• 强制透传: on（命令不再拦截）`（warning 色），armed 的一次性透传显示 `once（下一条）`。新增 `tests/passthrough.test.ts`（21 条）逐条钉住「十种原本会被拦截的行，透传后都是零回复 + 一次原样转发」，以及 once 自动回位、卡片不被吞、重启后关闭。
+
 - **`/status` 末尾新增 `[后台任务]` 段：当前会话的后台任务。** 数据来自宿主 `ctx.jobs`（就是 `job_list` / `job_output` / `job_kill` 那一套），输出总数与正在运行的具体任务：
 
   ```
@@ -19,6 +30,20 @@
   **口径只算当前会话**：`jobs.list(sessionId)` 本身按 owner 围栏（宿主只返回调用方自己的 + 无主的），bridge 再按 `owner === sessionId` 过滤一遍——别的会话的任务、以及不属于任何会话的无主任务，都不计数也不展示。`running` 与 `stopping` 都算运行中（还在收尾，用户需要看见）；按开始时间升序（跑得最久的排最前）；最多列 5 条，其余合成「… 另有 N 个运行中」。**一个任务都没有时整段不出现**——`共 0 个` 只是占位噪音，`[后台任务]` 这个标题下没有任何任务就不该占一行。有任务但都不在跑时才出一行 `⚪ 共 N 个`（「攒了几个没在跑」是有用的信息）。没有 `jobs` 服务、未绑定会话、或 `jobs.list` 抛错时同样整段省略（不会显示成 0 个，也不会出现「未挂载」），`/status` 永不因此失败。
 
 ### Changed
+
+- **打错的命令不再转发给 agent，只回用法。** 以前 `/s lsit`、`/workspace swich 2`、`/model foo` 这类行会先回一句用法，**然后照样转发给模型**——agent 对一句用户根本没打算说的话作答，错误命令进了 transcript，后面每一轮都得绕开它。现在只要能认出这是 bridge 自己的命令（`/s`、`/workspace`、`/model`、`/perm`、`/p`、`/reasoning`、`/enter`、`/notify`、`/silent`、`/status`、`/history`、`/at` …）而这一行没解析成功，就只回提示并停下：
+
+  ```
+  ⚠️ 没看懂「/s lsit」——这条消息没有转发给 agent。
+  用法: /session list [current] [all|数量] | switch [current] <n> | new | status | pin [编号] | unpin [编号]
+  例: /s list、/s switch 2
+  发 /help s 看全部例子。
+  ```
+
+  覆盖四种以前漏掉的情况：**子命令写错**（`/s lsit`）、**参数不对**（`/model foo`、`/reasoning high` 少了 `switch`）、**少打空格**（`/workspacelist` 回「是 /ws list 少了空格吗？」）、**名字本身打错**（`/stauts` → 「没有 /stauts 这条命令，你是想发 /status 吗？」；`/sessoin list`、`/modle foo`、`/models` 同理）。名字纠错守得很紧：输入 ≥5 字符、候选 ≥4 字符、编辑距离 ≤2、且最近候选唯一——所以 `/plan`、`/goal`、`/foo` 这类短名一动不动，照旧转发。`/help` 不印的长拼写（`/permission bogus`、`/busy bogus`、`/watch bogus`、`/wxprompt bogus`）按最短拼写 `/perm`、`/enter`、`/notify`、`/surface` 回用法。真没人认领的名字（`/nope`）行为不变：提示 + 转发，因为未注册的原生命令可能是一句想让模型读懂的话。新增 `tests/mistyped-command.test.ts` 钉住「只回用法、零转发」，并逐条断言每个 parser 认得的写法不会被误判。
+- **打错的命令还会绕过待处理卡片。** `/s lsit` 落在提问/权限卡等待期间时，以前会被当成卡片的自由文本答案提交（一个笔误，两处损失）。现在打错的命令也走 `isBypassSlashCommand`，卡片原样保留、用户拿到用法提示。
+- **`/history abc`、`/at nope` 的用法回复补上「这条消息没有转发给 agent」**，与其它命令同一措辞，用户不用猜这句话到底发没发出去。
+- **`/help` 结尾那句改为「已列出的命令写错子命令时只回用法，不转给 agent。」** 原文「其他 /xxx 会作为文本转给 agent」在新行为下已不准确。
 
 - **`/status` 的「会话级状态」可以选简洁或详细，默认简洁。** 新增配置项 `statusMode`（`brief` / `full`）：
 

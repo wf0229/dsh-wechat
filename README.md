@@ -50,6 +50,7 @@ dsh plugin --profile desktop list --depth 0    # 查看已装版本
 | `/history` | 查看最近历史，`all` 含系统消息 |
 | `/flush`（`/f`） | 立即取回结论模式暂存的结论 |
 | `/surface`（`/wxprompt`） | 微信渠道提示词注入开关 |
+| `/raw` | `on` / `off` / `once` / `status` — 强制透传，命令和文本原样转给 agent，不拦截 |
 | `/stop` | 中断当前任务 |
 | `/next` | 继续发送被微信限流缓存的消息 |
 | `/rq` | 关闭当前会话的待处理卡 |

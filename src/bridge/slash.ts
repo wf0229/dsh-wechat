@@ -38,6 +38,22 @@ export type MediaCommand =
   | { kind: "media"; target: "ref"; style: "at" | "path" }
   | { kind: "media"; target: "status" };
 export type SurfaceCommand = { kind: "surface"; mode: "on" | "off" | "status" };
+/**
+ * `/raw` — 强制透传开关.
+ *
+ * While this is on, EVERY inbound text goes to the agent verbatim: native
+ * dispatch, every local parser, the mistyped-command usage reply, the
+ * unknown-command hint and the `LOCAL_COMMAND_NAMES` shadowing all stand down.
+ * The one exception is the command that turns it back off, because otherwise
+ * the only way out would be restarting the plugin.
+ *
+ * `once` is the one-shot form: the NEXT message is passed through and the
+ * switch turns itself off. That covers "paste this one `/xxx` to the model"
+ * without leaving a mode on by accident — which matters because while it is on
+ * the bridge stops answering commands, and a user who forgot would think the
+ * bot broke.
+ */
+export type RawCommand = { kind: "raw"; mode: "on" | "off" | "status" | "once" };
 export type StopCommand = { kind: "stop" };
 export type RejectQuestionCommand = { kind: "reject-question" };
 export type RejectPermissionCommand = { kind: "reject-permission" };
@@ -197,6 +213,46 @@ export function parseSurfaceCommand(text: string): SurfaceCommand | null {
   return { kind: "surface", mode: m[1] as "on" | "off" | "status" };
 }
 
+/**
+ * Parse `/raw` (alias `/passthru`) — 强制透传开关.
+ *
+ *   /raw             → status
+ *   /raw on | off    → toggle
+ *   /raw once        → pass through the NEXT message, then turn itself off
+ *
+ * The name has to be recognized even while the switch is ON — otherwise the
+ * switch would be a one-way door — so `parseRawCommand` is the one parser the
+ * passthrough bypass deliberately consults (see `isPassthroughCommand`).
+ *
+ * `/passthru` is the documentation-friendly synonym: "raw" alone reads like a
+ * rendering mode, while "passthru" says what it does to the command layer.
+ */
+export function parseRawCommand(text: string): RawCommand | null {
+  const trimmed = text.trim().toLowerCase();
+  if (trimmed === "/raw" || trimmed === "/passthru") {
+    return { kind: "raw", mode: "status" };
+  }
+  const m = trimmed.match(/^\/(?:raw|passthru)\s+(on|off|status|once)\s*$/);
+  if (!m) return null;
+  return { kind: "raw", mode: m[1] as "on" | "off" | "status" | "once" };
+}
+
+/**
+ * True when `text` is the `/raw` command ITSELF, in any of its forms.
+ *
+ * The passthrough gate uses this to let the escape hatch through: with `/raw
+ * on` active, every other line bypasses the bridge, but the line that says
+ * `/raw off` must still be read as a command — otherwise turning it off would
+ * require editing state.json.
+ *
+ * Deliberately narrower than `parseRawCommand` returning anything: a BARE
+ * `/raw` (status query) also counts, because a user checking "is it on?" while
+ * it is on should get an answer, not a forwarded `/raw`.
+ */
+export function isRawCommandText(text: string): boolean {
+  return parseRawCommand(text) !== null;
+}
+
 /** Parse `/stop`. */
 export function parseStopCommand(text: string): StopCommand | null {
   const trimmed = text.trim().toLowerCase();
@@ -306,23 +362,333 @@ export function detectUnknownSlashCommand(text: string): string | null {
 }
 
 /**
- * Usage line for a DOCUMENTED command whose arguments did not parse.
+ * Long spellings the parsers accept but `/help` deliberately does not print.
+ *
+ * `HelpCommandEntry.aliases` holds SHORTENINGS only (`/s`, `/ws`, `/md`), so a
+ * synonym such as `/permission` or `/busy` is parsed by its command and shown
+ * by no row at all. Without this map a typo in one of those (`/permission
+ * bogus`) would resolve to nothing and fall through to the agent.
+ */
+const COMMAND_SYNONYMS: Readonly<Record<string, string>> = {
+  agent: "preset",
+  permission: "perm",
+  busy: "enter",
+  watch: "notify",
+  notice: "notify",
+  wxprompt: "surface",
+  "reject-question": "rq",
+};
+
+/**
+ * Usage line for the card commands `/help` does not catalog.
+ *
+ * `/rp` is documented only as a clause inside `/rq`'s usage, so
+ * `findHelpEntry("rp")` cannot answer a typo. Hard-coded rather than added to
+ * the catalog, because a `/rp` row would print a second card row that says
+ * almost the same thing as `/rq`.
+ */
+const CARD_COMMAND_USAGE: Readonly<Record<string, string>> = {
+  rp: "/rp（只拒绝当前会话的权限卡；/rq 关闭全部卡片）",
+  "reject-permission": "同 /rp",
+};
+
+/**
+ * Minimum spelling length that may be glued to its argument (`/workspacelist`).
+ *
+ * A short prefix (`/s`, `/ws`, `/at`) is only accepted in front of an EXACT
+ * subcommand (`/wslist`, `/atrm`): the shorter the name, the more English words
+ * start with it, and a heuristic that answers instead of forwarding must not
+ * claim `/stats` or `/such-and-such`.
+ */
+const GLUE_MIN_NAME = 3;
+
+/**
+ * Levenshtein distance, capped: anything above `limit` returns `limit + 1`.
+ *
+ * Only used to ask "is this a typo of that subcommand" (`lsit` → `list`), so
+ * the exact distance above 2 never matters.
+ */
+function editDistance(a: string, b: string, limit = 2): number {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const value = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + cost);
+      current.push(value);
+      if (value < best) best = value;
+    }
+    if (best > limit) return limit + 1;
+    previous = current;
+  }
+  return previous[b.length]!;
+}
+
+/** What a mistyped line resolves to: enough to answer it without the agent. */
+interface LocalCommandRef {
+  /** The spelling the reply shows (`/s`, not `/session`). */
+  command: string;
+  /**
+   * The canonical long spelling (`/session`).
+   *
+   * Used when the reply has to name the command the user probably MEANT: a
+   * typo like `/sessoin` is closer to the long name, so answering "你是想发 /s
+   * 吗" points at the wrong shape even though both run the same handler.
+   */
+  fullCommand: string;
+  /** The catalog's grammar line. */
+  usage: string;
+  /** `/help <topic>` for the catalog entry, when it has one. */
+  topic?: string;
+  /** Two copyable examples (never the `..` / `!!` text rows). */
+  examples: string[];
+  /** First token of every documented subcommand, lowercased. */
+  subcommandHeads: string[];
+}
+
+/**
+ * Resolve one slash name to the command the bridge owns, or `null`.
+ *
+ * `/help` is deliberately absent: `/help <任何文字>` is a help request whose
+ * own branch answers with the listing, so it must never be reported as a
+ * mistyped command line.
+ */
+function lookupLocalCommandName(rawName: string): LocalCommandRef | null {
+  const name = rawName.toLowerCase();
+  const synonym = COMMAND_SYNONYMS[name];
+  const entry = findHelpEntry(name) ?? (synonym ? findHelpEntry(synonym) : undefined);
+  if (entry) {
+    if (entry.id === "help") return null;
+    const command = shortestSpelling(entry);
+    return {
+      command,
+      fullCommand: entry.command,
+      usage: entry.usage,
+      topic: command.slice(1),
+      examples: entry.examples
+        .filter((example) => (example.kind ?? "command") === "command")
+        .slice(0, 2)
+        .map((example) => example.line),
+      subcommandHeads: [
+        ...new Set(entry.subcommands.map((sub) => sub.split(/\s+/)[0]!.toLowerCase())),
+      ],
+    };
+  }
+  const usage = CARD_COMMAND_USAGE[name];
+  return usage
+    ? { command: `/${name}`, fullCommand: `/${name}`, usage, examples: [], subcommandHeads: [] }
+    : null;
+}
+
+/**
+ * Resolve a name that ran INTO its argument (`/workspacelist`, `/wslist`).
+ *
+ * The longest matching prefix wins, and the remainder must be EVIDENCE that
+ * this really was that command: either one of its subcommands (`list`), or a
+ * one-of-two-edit typo of one whose first letter matches (`lsit`). Without that
+ * gate every English word starting with a command name would be claimed —
+ * `/enterprise` reads as `/enter` + `prise`.
+ *
+ * A prefix shorter than {@link GLUE_MIN_NAME} (`/ws`, `/s`, `/at`) is stricter
+ * on purpose: only an EXACT subcommand counts (`/wslist`), because `/s` and
+ * `/ws` begin far too many words for a fuzzier rule to be safe.
+ */
+function lookupGluedLocalCommand(token: string): { ref: LocalCommandRef; rest: string } | null {
+  const lower = token.toLowerCase();
+  for (let cut = lower.length - 1; cut >= 1; cut--) {
+    const name = lower.slice(0, cut);
+    const ref = lookupLocalCommandName(name);
+    if (!ref) continue;
+    const rest = lower.slice(cut);
+    const heads = ref.subcommandHeads;
+    if (heads.length === 0) continue;
+    const exact = heads.includes(rest);
+    if (exact) return { ref, rest };
+    if (cut < GLUE_MIN_NAME || rest.length < 3) continue;
+    if (heads.some((head) => head[0] === rest[0] && editDistance(head, rest) <= 2)) {
+      return { ref, rest };
+    }
+  }
+  return null;
+}
+
+/**
+ * Minimum length of a name that may be CORRECTED (`/stauts` → `/status`).
+ *
+ * Fuzzy matching on a short name is a guessing game: `/plan`, `/goal`, `/foo`
+ * and `/etc` sit one or two edits from `perm`, `next`, `help` or `at`, and
+ * answering those would break the contract that an unregistered `/xxx` may be
+ * prose the model should read. The input threshold alone keeps every 4-letter
+ * native name (`/plan`, `/goal`) out, because a name that SHORT is far more
+ * likely to be a registered command this profile lacks than a typo.
+ */
+const SUGGEST_MIN_INPUT = 5;
+/**
+ * Minimum length of the candidate a typo may resolve to.
+ *
+ * 4-letter commands (`stop`, `perm`, `next`) are included so a typo that is
+ * longer than its target (`/stopp` → `/stop`) is still answered — only the
+ * INPUT length is gated, which is exactly what distinguishes a typo from a
+ * different word.
+ */
+const SUGGEST_MIN_TARGET = 4;
+const SUGGEST_MAX_DISTANCE = 2;
+
+/**
+ * The documented name `token` is most likely a typo of, or `null`.
+ *
+ * Ambiguity is a refusal: two candidates at the same distance (`/modle` sits
+ * between `model` and nothing else, but a name like `/finai` could reach both
+ * `final` and `media`) means the guess is not safe enough to answer INSTEAD of
+ * forwarding, so it returns `null` and the line takes the unknown-command path.
+ */
+function lookupTypoCorrectedName(token: string): LocalCommandRef | null {
+  if (token.length < SUGGEST_MIN_INPUT) return null;
+  const candidates: Array<{ ref: LocalCommandRef; distance: number }> = [];
+  for (const entry of helpCatalog().commands) {
+    if (entry.id === "help") continue;
+    for (const spelling of [entry.command.replace(/^\//, ""), ...(entry.aliases ?? [])]) {
+      const name = spelling.replace(/^\//, "").toLowerCase();
+      if (name.length < SUGGEST_MIN_TARGET) continue;
+      const distance = editDistance(name, token.toLowerCase(), SUGGEST_MAX_DISTANCE);
+      if (distance > SUGGEST_MAX_DISTANCE) continue;
+      const ref = lookupLocalCommandName(name);
+      if (ref) candidates.push({ ref, distance });
+    }
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => a.distance - b.distance);
+  const best = candidates[0]!;
+  // More than one distinct command at the best distance = no safe guess.
+  if (candidates.some((c) => c.distance === best.distance && c.ref.command !== best.ref.command)) {
+    return null;
+  }
+  return best.ref;
+}
+
+/**
+ * Parse a line that named a command this bridge owns but that no parser
+ * accepted — a mistyped subcommand (`/s lsit`), a bad argument
+ * (`/model foo`), a missing space (`/workspacelist`), or a mistyped NAME
+ * (`/stauts`).
+ *
+ * Returns `null` for every line a parser DID accept (`/s list`), for a help
+ * request, and for a name nobody plausibly owns (`/nope`, `/plan off`).
+ */
+function resolveMistypedCommand(
+  text: string,
+): { ref: LocalCommandRef; gluedRest?: string; misspelledName?: boolean; shown: string } | null {
+  if (!text) return null;
+  // A line that parses is by definition not mistyped. `/at` is checked on the
+  // ATTEMPT (see `isAtCommandAttempt`), because its own branch answers with
+  // its usage rather than forwarding.
+  if (recognizesLocalCommand(text) || isAtCommandAttempt(text)) return null;
+  const trimmed = text.trim();
+  const m = trimmed.match(/^\/([A-Za-z][A-Za-z0-9-]*)/);
+  if (!m) return null;
+  const token = m[1]!;
+  const direct = lookupLocalCommandName(token);
+  if (direct) return { ref: direct, shown: trimmed };
+  // `/models`, `/sessions`, `/workspaces`, `/permissions` — a plural of a real
+  // name is the same command, not a new one. Requires the singular to be a
+  // command this bridge owns, so `/plans` (native, unregistered) still falls
+  // through to the agent.
+  if (token.length > 2 && /s$/i.test(token)) {
+    const plural = lookupLocalCommandName(token.slice(0, -1));
+    if (plural) return { ref: plural, misspelledName: true, shown: trimmed };
+  }
+  const glued = lookupGluedLocalCommand(token.toLowerCase());
+  if (glued) return { ref: glued.ref, gluedRest: glued.rest, shown: trimmed };
+  // The name itself is misspelled — answer with the command it probably meant.
+  const corrected = lookupTypoCorrectedName(token);
+  if (corrected) return { ref: corrected, misspelledName: true, shown: trimmed };
+  return null;
+}
+
+/**
+ * True when one of the bridge's OWN parsers accepts `text`.
+ *
+ * The list is written out rather than reusing `isBypassSlashCommand` because
+ * the two answer different questions: bypass excludes the card commands
+ * (`/rq`, `/rp`) and matches `/at` on the attempt, while this has to mean
+ * "some handler will run". Ordering inside the caller is irrelevant, which is
+ * the point — `resolveMistypedCommand` runs BEFORE the dispatch chain, so it
+ * must not depend on which branch would have won.
+ */
+function recognizesLocalCommand(text: string): boolean {
+  return (
+    parseHelpCommand(text) !== false ||
+    parseNextCommand(text) ||
+    parseFlushCommand(text) ||
+    parseStatusCommand(text) !== null ||
+    parseSilentCommand(text) !== null ||
+    parseFinalCommand(text) !== null ||
+    parseMergeCommand(text) !== null ||
+    parseMediaCommand(text) !== null ||
+    parseSurfaceCommand(text) !== null ||
+    parseRawCommand(text) !== null ||
+    parseStopCommand(text) !== null ||
+    parseNotifyCommand(text) !== null ||
+    parseRejectQuestionCommand(text) !== null ||
+    parseRejectPermissionCommand(text) !== null ||
+    parseWorkspaceCommand(text) !== null ||
+    parseSessionCommand(text) !== null ||
+    parsePresetCommand(text) !== null ||
+    parseModelCommand(text) !== null ||
+    parsePermCommand(text) !== null ||
+    parseReasoningCommand(text) !== null ||
+    parseEnterCommand(text) !== null ||
+    parseHistoryCommand(text) !== null ||
+    parseAtCommand(text) !== null
+  );
+}
+
+/**
+ * True when `text` names a command this bridge owns but is not a valid line
+ * for it — `/s lsit`, `/workspacelist`, `/model foo`.
+ *
+ * Used by {@link isBypassSlashCommand}: a mistyped command is still the user
+ * typing a command, so a pending question/approval card must not swallow it as
+ * a free-text answer. The reply is the usage line, sent by `handleMessage`.
+ */
+export function isMistypedLocalCommand(text: string): boolean {
+  return resolveMistypedCommand(text) !== null;
+}
+
+/** Truncate a quoted line for a reply without splitting a surrogate pair. */
+function quoteForHint(text: string, limit = 60): string {
+  const chars = Array.from(text);
+  return chars.length <= limit ? text : chars.slice(0, limit - 1).join("") + "…";
+}
+
+/**
+ * The reply for a command line the bridge owns but could not execute.
  *
  * `/model foo` is not an unknown command — `/model` is printed in the `/help`
  * listing, so answering "未知命令 /model" contradicts what the user just read.
- * The command exists; the argument is wrong, and the reply has to say which
- * argument it wanted. Bare commands never reach here (every parser handles
- * them), and `/help <文字>` is excluded because that is a question for the
- * agent, not a syntax error.
+ * The command exists; the argument does not, so the reply quotes the line, the
+ * grammar, two copyable examples, and the `/help <命令>` pointer.
+ *
+ * The caller must NOT forward the line afterwards: a mistyped command sent to
+ * the agent costs a whole turn of prose the user has to talk their way out of,
+ * which is exactly the polluted context this reply exists to prevent.
  */
 export function commandUsageHint(text: string): string | null {
-  const trimmed = text.trim();
-  const m = trimmed.match(/^\/([a-zA-Z][a-zA-Z0-9-]*)\s+([\s\S]*)$/);
-  if (!m) return null;
-  const entry = findHelpEntry(m[1]!);
-  if (!entry) return null;
-  if (entry.id === "help") return null;
-  return `⚠️ 用法: ${entry.usage}`;
+  const resolved = resolveMistypedCommand(text);
+  if (!resolved) return null;
+  const { ref, gluedRest, misspelledName, shown } = resolved;
+  const quoted = quoteForHint(shown);
+  const opening = gluedRest
+    ? `⚠️ 没看懂「${quoted}」——是 ${ref.command} ${gluedRest} 少了空格吗？这条消息没有转发给 agent。`
+    : misspelledName
+      ? `⚠️ 没有 ${quoted.split(/\s+/)[0]} 这条命令，你是想发 ${ref.fullCommand} 吗？这条消息没有转发给 agent。`
+      : `⚠️ 没看懂「${quoted}」——这条消息没有转发给 agent。`;
+  const lines: string[] = [opening, `用法: ${ref.usage}`];
+  if (ref.examples.length > 0) lines.push(`例: ${ref.examples.join("、")}`);
+  if (ref.topic) lines.push(`发 /help ${ref.topic} 看全部例子。`);
+  return lines.join("\n");
 }
 
 /**
@@ -879,6 +1245,9 @@ export function isBypassSlashCommand(text: string): boolean {
     parseMergeCommand(text) !== null ||
     parseMediaCommand(text) !== null ||
     parseSurfaceCommand(text) !== null ||
+    // `/raw` must bypass a pending card: it is the escape hatch, and it is
+    // also the only command that works while passthrough is on.
+    parseRawCommand(text) !== null ||
     parseStatusCommand(text) !== null ||
     parseWorkspaceCommand(text) !== null ||
     parseSessionCommand(text) !== null ||
@@ -895,7 +1264,12 @@ export function isBypassSlashCommand(text: string): boolean {
     // card's own semantics untouched. `/history` keeps the stricter
     // valid-parse rule it has always had.
     isAtCommandAttempt(text) ||
-    parseStopCommand(text) !== null
+    // A mistyped line for a command this bridge owns (`/s lsit`,
+    // `/workspacelist`) is still a command attempt, not a free-text answer: it
+    // must reach `handleMessage` to get its usage reply instead of being
+    // submitted as the card's answer.
+    parseStopCommand(text) !== null ||
+    isMistypedLocalCommand(text)
   );
 }
 
@@ -939,6 +1313,8 @@ export const LOCAL_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "md",
   "surface",
   "wxprompt",
+  "raw",
+  "passthru",
   "stop",
   "next",
   "flush",
@@ -1053,7 +1429,7 @@ export function formatHelp(
       "```",
     );
   }
-  lines.push("", "其他 /xxx 会作为文本转给 agent。");
+  lines.push("", "已列出的命令写错子命令时只回用法，不转给 agent。");
   return lines.join("\n");
 }
 

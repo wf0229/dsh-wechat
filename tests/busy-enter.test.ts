@@ -61,7 +61,12 @@ describe("parseEnterCommand", () => {
     expect(isBypassSlashCommand("/enter")).toBe(true);
     expect(isBypassSlashCommand("/enter queue")).toBe(true);
     expect(isBypassSlashCommand("/busy steer")).toBe(true);
-    expect(isBypassSlashCommand("/enter bogus")).toBe(false);
+    // A mistyped subcommand of a command the bridge owns also bypasses: it is
+    // a command attempt, so it must reach the usage reply instead of being
+    // submitted as the pending card's free-text answer.
+    expect(isBypassSlashCommand("/enter bogus")).toBe(true);
+    // A name nobody owns stays a card answer.
+    expect(isBypassSlashCommand("/enterprise")).toBe(false);
     expect(formatHelp()).toContain("/enter ");
   });
 });

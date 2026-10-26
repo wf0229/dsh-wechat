@@ -125,7 +125,30 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 
 微信消息进入后，bridge **先**向 DSH 的 `ctx.commands` 注册中心查询当前会话已注册的命令（这是 DSH 内置的人类 slash 命令注册服务，由 `@deepseek-ai/dsh-commands` 提供；`/plan`、`/goal`、`/compact` 等命令都由各自的 bundle 在那里注册）。命中即直接交给原生 handler 执行，并把结果回执渲染到微信——和 GUI 走同一条命令管线。
 
-未注册的命令回落到本仓库硬写的本地命令表（`/silent`、`/next`、`/rq`、`/workspace`、`/session` 等），命中失败时按「未知命令」提示并作为文本转发给 agent。DSH 的 `ctx.commands` 服务在某些极简装配下可能不挂载（缺失时会打一次 warn），这种情形行为完全等同之前的版本。
+未注册的命令回落到本仓库硬写的本地命令表（`/silent`、`/next`、`/rq`、`/workspace`、`/session` 等）。**能认出来是本地命令、但这一行没解析成功时，只回用法，绝不转发**。四种情况都算「认出来了」：
+
+- 子命令写错：`/s lsit`、`/ws swtich 2`
+- 参数不对：`/model foo`、`/reasoning high`（少了 `switch`）
+- 少打空格：`/workspacelist` → 回「是 /ws list 少了空格吗？」
+- 名字本身打错：`/stauts` → `/status`、`/sessoin list` → `/session`、`/models` → `/model`（只有输入 ≥5 字符、候选 ≥4 字符、编辑距离 ≤2、且最近候选唯一时才纠错；`/plan`、`/goal`、`/foo` 这类短名一律不动）
+
+`commandUsageHint()` 负责这句话：**没看懂「…」+ 用法 + 两个例子 + `/help <命令>`**，然后 `return`。`/help` 不印的长拼写（`/permission`、`/busy`、`/watch`、`/wxprompt`）按最短拼写（`/perm`、`/enter`、`/notify`、`/surface`）回。真正没人认领的名字（`/nope`）才按「未知命令」提示并作为文本转发——因为未注册的原生命令（`/plan` 在没有装对应 bundle 的 profile 里）可能只是一句想让模型读懂的话。DSH 的 `ctx.commands` 服务在某些极简装配下可能不挂载（缺失时会打一次 warn），这种情形行为完全等同之前的版本。
+
+这条边界的理由是上下文成本：一条打错的命令转发出去，agent 会对一句用户根本没打算说的话作答，错误命令进了 transcript，后面每一轮都得绕开它。开头带斜杠不是手滑——用户在对着命令说话，那就由命令来回答（`/help`、`/at` 一直如此）。
+
+打错的命令同样会**绕过待处理的提问/权限卡**（`isBypassSlashCommand` 已包含 `isMistypedLocalCommand`）：它是一次命令尝试，不是卡片的自由文本答案。否则一个笔误会同时毁掉命令和卡片。
+
+### 强制透传（`/raw`）
+
+上面那一整套拦截——原生注册中心、本地命令表、`/help`、用法提示、未知命令提示、卡片吞并——全部由 `/raw on` 一次性让开：
+
+- `/raw on`：之后每条消息**原样**转给 agent，斜杠前缀保留，网关一句话都不回。`handleMessage` 在 `tryNativeCommand` 之前检查 `passthroughActive()`，命中就 `enqueueInbound` 后直接 `return`，后面的所有分支都不可达。`bypassCard` 也读它，所以待处理卡片不会把透传消息当成自己的答案（卡片保持 pending，不被拒绝）。
+- `/raw once`：只透传下一条，然后自动关闭。覆盖「就把这一行 `/xxx` 交给模型」的常见场景，用完不会留下一个「机器人不再响应命令」的模式。
+- `/raw off`、`/raw`（查状态）：**透传期间仍然有效**。开关如果在聊天里关不掉就是陷阱，所以 `parseRawCommand` 在任何拦截之前执行。
+- **不持久化**：`passthrough` 不在 `EDITABLE_KEYS` 里，重启插件必然回到「命令优先」。运维重启时无法知道机器人当前是不是聋的，所以这个状态不允许穿越重启。
+- `/status` 在开启时多一行 `• 强制透传: on（命令不再拦截）`（warning 色），armed 的 once 显示 `once（下一条）`。
+
+`tests/passthrough.test.ts` 逐条钉住「十种原本会被拦截的行，透传后都变成零回复 + 一次原样转发」，以及 once 的自动回位和「重启后关闭」。
 
 所以：**DSH 加任何新的 `/xxx` 命令 bundle，微信端无需改动即可识别**——只要它是按 DSH 命令注册契约挂上去的。例如装有 `dsh-plan-mode` 时微信发 `/plan off` 收到原生回执 "Plan mode off."；装有 `dsh-command-goal` 时 `/goal <目标>` 收到原生 "Goal created ..."；装有 `dsh-command-compact` 时 `/compact` 收到 "Compacted N history items (~M tokens)."——与 GUI 同款回执，由原生 handler 自己算、自己发。
 
@@ -133,7 +156,7 @@ Markdown 由微信客户端渲染，`formatForWeChat()` 的过滤器会剥掉部
 
 ### 本地命令的语义细节
 
-其他 `/xxx` 命令作为文本转发给 agent；审批/提问卡双端同弹，已在其他端处理的卡会提示。
+其他 `/xxx`：父命令命中但没解析成功的一律只回用法（不转发），没人认领的名字才作为文本转发给 agent；审批/提问卡双端同弹，已在其他端处理的卡会提示。`/raw on` 期间上述规则全部暂停，见上文「强制透传」。
 
 在微信里回答卡片后会收到回执：`✅ 已允许权限卡 P{n}（工具名）。`、`⛔ 已拒绝权限卡 P{n}（工具名）。`、`✅ 已回复提问卡 P{n}。`——`P{n}` 就是卡片上印的编号，一次 `P1=1 P2=2` 会各回一条。回执是对你自己刚做的动作的确认，**不受** `/notify` 两个开关与静默模式影响。来自其他会话的卡片在正文里标 `❗来自其他会话`。
 

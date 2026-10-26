@@ -45,6 +45,17 @@
 
 ### Changed
 
+- **`/preset switch` 改成切「当前会话」的 Preset，新增 `/preset default` 改新会话默认。** 以前这两个动作是同一个命令，而且是同一个**后果**：`/preset switch cordis` 不管用户想干什么，都把 `agent-preset-registry.selectedDefault` 写掉——也就是这台 DSH 之后**每一个**新会话的默认预设，因为一条微信消息改了全局设置。现在按作用域拆开：
+
+  ```
+  /preset switch 2         # 切当前会话（第一条消息之前才行）
+  /preset switch cordis    # 按名称切当前会话
+  /preset default cordis   # 改新会话默认，写入 DSH 设置，与 GUI 同步
+  /preset default          # 只读：新会话用哪个预设
+  ```
+
+  `switch` 走宿主自己的 `agentPresets.select`（GUI 预设选择器同一条调用），既重绑当前 Agent 的组成、也追加持久化 `agent-preset/selected` 事件，所以重启恢复后仍是新预设，`/s list` 与 `/status` 立刻显示新值；**不再碰设置文档**。DSH 的约束（预设只在会话第一条消息之前可改）现在被如实报出来，而不是含糊地记成「下个新会话生效」：已开始的会话回「当前会话已经开始，Preset 不能再改…先发 /s new 新建会话」，判定用宿主自己的谓词 `sessionProjections.stateOf(session, "turnBoundary")`（`openTurnStartSeq !== null || lastTurn > 0`），旧宿主没有该投影时回落到事件日志。`default` 反过来只管设置文档，与当前会话无关——会话已经在跑也照样允许，回复里会补一句「当前会话仍是 X，/s new 后生效」。`/preset status` 相应分两行报「新会话默认」与「当前会话」，`/preset list` 分别标 `◀ 新会话默认` / `◀ 当前会话`。`tests/preset-switch.test.ts` 重写（26 条）钉住两侧的边界：`switch` 零设置写入、`default` 零会话切换、已开始的会话被拒绝、宿主仍抛 `agent-preset/locked` 时如实报锁。
+
 - **打错的命令不再转发给 agent，只回用法。** 以前 `/s lsit`、`/workspace swich 2`、`/model foo` 这类行会先回一句用法，**然后照样转发给模型**——agent 对一句用户根本没打算说的话作答，错误命令进了 transcript，后面每一轮都得绕开它。现在只要能认出这是 bridge 自己的命令（`/s`、`/workspace`、`/model`、`/perm`、`/p`、`/reasoning`、`/enter`、`/notify`、`/silent`、`/status`、`/history`、`/at` …）而这一行没解析成功，就只回提示并停下：
 
   ```

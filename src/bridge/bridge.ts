@@ -39,7 +39,6 @@ import { AgentStore, type BridgeContext } from "../dsh/sessions.js";
 import { DshOps } from "../dsh/ops.js";
 import type { ModelSelection, PinOutcome, SessionHeader, SessionRecord, SkillEntry } from "../dsh/ops.js";
 import type { Agent, AgentSessionLike, AskUserQuestionAnswer, AskUserQuestionItem } from "../dsh/types.js";
-import { sessionEvents } from "../dsh/types.js";
 import {
   MAX_OUTBOUND_QUEUE,
   MAX_OUTBOUND_QUEUE_HARD,
@@ -5256,81 +5255,178 @@ export class WeChatDSHBridge {
     return undefined;
   }
 
+  /**
+   * `/preset` — two different facts under one command:
+   *
+   *   - `switch <名称|编号>` is SESSION-scoped and only legal before the bound
+   *     session's first turn (DSH locks a preset once a turn has run). This is
+   *     the shape a user reaches for when a fresh session is not yet locked in,
+   *     so it goes through the host's own `agentPresets.select` — the same call
+   *     the GUI's preset picker makes — and never touches the global default.
+   *   - `default [名称|编号]` is DEPLOYMENT-scoped: it writes the DSH settings
+   *     document shared with the GUI settings page, applying to every NEW
+   *     session from now on.
+   *
+   * `status` reports both, so one reply answers "what does this session run"
+   * and "what will the next one run".
+   */
   private async handlePresetCommand(userId: string, cmd: PresetCommand): Promise<void> {
     const user = this.ensureBoundUser(userId);
+    // The roster is the shared target resolver for `switch` and `default`.
+    const presets = (await this.ops.listPresets()).filter((p) => !p.broken);
+    const resolveTarget = (target: string) => {
+      if (/^\d+$/.test(target)) {
+        const index = parseInt(target, 10);
+        return index >= 1 && index <= presets.length ? presets[index - 1] : undefined;
+      }
+      return presets.find((p) => p.id === target || p.name === target);
+    };
+
     switch (cmd.kind) {
       case "list": {
-        const presets = (await this.ops.listPresets()).filter((p) => !p.broken);
         if (presets.length === 0) {
           await this.sendReply(userId, "🤖 暂无可用 Preset。");
           return;
         }
         const current = this.ops.defaultPresetId();
-        const lines = ["🤖 可用 Preset（/preset switch <名称|编号>，写入 DSH 默认设置）"];
+        const liveId = user.sessionId
+          ? await this.ops.resolveSessionPreset(user.sessionId, user.cwd)
+          : undefined;
+        const lines = ["🤖 可用 Preset（/preset switch <名称|编号> 切当前会话，/preset default <名称|编号> 改新会话默认）"];
         presets.forEach((preset, i) => {
-          const marker = preset.id === current ? " ◀ 当前默认" : "";
-          lines.push(`${i + 1}. ${preset.name ?? preset.id} — ${preset.id}${marker}`);
+          const markers = [
+            preset.id === liveId ? " ◀ 当前会话" : "",
+            preset.id === current ? " ◀ 新会话默认" : "",
+          ].join("");
+          lines.push(`${i + 1}. ${preset.name ?? preset.id} — ${preset.id}${markers}`);
           if (preset.description) lines.push(`   ${preset.description}`);
         });
         await this.sendReply(userId, lines.join("\n"));
         return;
       }
       case "switch": {
-        const presets = (await this.ops.listPresets()).filter((p) => !p.broken);
-        let preset;
-        if (/^\d+$/.test(cmd.target)) {
-          const index = parseInt(cmd.target, 10);
-          preset = presets[index - 1];
-          if (!preset) {
-            await this.sendReply(userId, `⚠️ 编号超出范围（1-${presets.length}）。`);
+        const preset = resolveTarget(cmd.target);
+        if (!preset) {
+          await this.sendReply(
+            userId,
+            /^\d+$/.test(cmd.target)
+              ? `⚠️ 编号超出范围（1-${presets.length}）。`
+              : `⚠️ 未知 Preset: ${cmd.target}。用 /preset list 查看。`,
+          );
+          return;
+        }
+        // A bound session that this process has not loaded yet (fresh restart)
+        // is resumed here: telling the user to "send a message first" would be
+        // the one piece of advice that DESTROYS the option — sending a message
+        // starts the turn, and a started session can no longer change preset.
+        // Resuming is side-effect free for a blank session, which is the only
+        // state in which the switch can succeed anyway.
+        let agent = this.agents.get(user);
+        if (!agent && user.sessionId) {
+          agent = (await this.agents.ensure(user)).agent;
+        }
+        if (!agent) {
+          await this.sendReply(
+            userId,
+            [
+              "⚠️ 当前没有可用会话，Preset 无处可切。",
+              "先发 /s new 新建会话，再发 /preset switch <名称|编号>；想改「新会话默认」用 /preset default <名称|编号>。",
+            ].join("\n"),
+          );
+          return;
+        }
+        const label = preset.name ?? preset.id;
+        // DSH's own constraint, asked BEFORE the attempt so the reply can name
+        // the way out instead of surfacing a raw `agent-preset/locked` fault.
+        if (this.ops.sessionStarted(agent.session as AgentSessionLike | undefined)) {
+          await this.sendReply(
+            userId,
+            [
+              `⚠️ 当前会话已经开始，Preset 不能再改: ${label}（未切换）。`,
+              "预设只在会话的第一条消息之前可以切换，这是 DSH 的限制。",
+              "先发 /s new 新建会话，再发 /preset switch；想改「新会话默认」用 /preset default <名称|编号>。",
+            ].join("\n"),
+          );
+          return;
+        }
+        const outcome = await this.ops.selectSessionPreset(agent, preset.id);
+        switch (outcome.kind) {
+          case "switched":
+            await this.sendReply(userId, `✅ 当前会话 Preset 已切换: ${label}（仅本会话，新会话默认不变）`);
             return;
-          }
-        } else {
-          preset = presets.find((p) => p.id === cmd.target || p.name === cmd.target);
-          if (!preset) {
-            await this.sendReply(userId, `⚠️ 未知 Preset: ${cmd.target}。用 /preset list 查看。`);
+          case "locked":
+            await this.sendReply(
+              userId,
+              `⚠️ 当前会话已经开始，Preset 不能再改: ${label}（未切换）。先发 /s new 新建会话再切。`,
+            );
             return;
-          }
+          case "unsupported":
+            await this.sendReply(
+              userId,
+              "⚠️ 当前部署不支持在微信端切换会话 Preset（agentPresets 服务不可用）。可在 DSH 界面切换。",
+            );
+            return;
+          default:
+            await this.sendReply(userId, `⚠️ 切换 Preset 失败: ${label} —— ${maskSecrets(outcome.message)}`);
+            return;
+        }
+      }
+      case "default": {
+        // Bare `/preset default` reports the default, like `/perm default`.
+        if (!cmd.target) {
+          const defaultLabel = (await this.resolvePresetLabel(this.ops.defaultPresetId())) ?? "（未设置）";
+          await this.sendReply(userId, `🤖 新会话默认 Preset: ${defaultLabel}`);
+          return;
+        }
+        const preset = resolveTarget(cmd.target);
+        if (!preset) {
+          await this.sendReply(
+            userId,
+            /^\d+$/.test(cmd.target)
+              ? `⚠️ 编号超出范围（1-${presets.length}）。`
+              : `⚠️ 未知 Preset: ${cmd.target}。用 /preset list 查看。`,
+          );
+          return;
         }
         // Write the DSH settings document — the same default the GUI settings
         // page edits, so both sides see the same selection.
         const saved = await this.ops.saveDefaultPreset(preset.id);
         if (!saved) {
-          await this.sendReply(userId, `⚠️ 默认 Preset 切换失败: ${preset.name ?? preset.id}（无法写入 DSH 设置，默认 Preset 未更改）。`);
+          await this.sendReply(
+            userId,
+            `⚠️ 默认 Preset 切换失败: ${preset.name ?? preset.id}（无法写入 DSH 设置，默认 Preset 未更改）。`,
+          );
           return;
         }
-        // Apply to the live session only while it has produced nothing.
-        const agent = this.agents.get(user);
-        const empty = agent ? sessionEvents(agent.session).length === 0 : true;
-        let applied = "";
-        if (agent && empty) {
-          const ok = await this.ops.recomposeAgent(
-            (agent as { ctx?: unknown }).ctx,
-            preset.id,
-          );
-          applied = ok ? "（已应用到当前会话）" : "（当前会话应用失败）";
-        } else if (agent) {
-          applied = "（当前会话已有内容，Preset 将应用于下一个新会话）";
-        }
-        await this.sendReply(userId, `✅ 默认 Preset 已切换: ${preset.name ?? preset.id}${applied}。`);
-        return;
-      }
-      case "status": {
-        // `/preset` is the deployment-default family (`list` / `switch`
-        // write the DSH settings document). Status must report that
-        // default — not the bound session's live preset. `/status` and
-        // `/s list` remain the session-live views. Agent status belongs
-        // on `/status`, not here.
-        const defaultId = this.ops.defaultPresetId();
-        const defaultLabel = (await this.resolvePresetLabel(defaultId)) ?? "（未设置）";
-        const lines = [`🤖 默认 Preset: ${defaultLabel}`];
+        // Report what the bound session actually runs: the saved default only
+        // takes effect for sessions created afterwards, and an already-running
+        // conversation keeps its own preset.
         const liveId = user.sessionId
           ? await this.ops.resolveSessionPreset(user.sessionId, user.cwd)
           : undefined;
-        if (liveId && liveId !== defaultId) {
+        const live = liveId && liveId !== preset.id
+          ? `（当前会话仍是 ${(await this.resolvePresetLabel(liveId)) ?? liveId}，/s new 后生效）`
+          : "";
+        await this.sendReply(userId, `✅ 新会话默认 Preset 已切换: ${preset.name ?? preset.id}${live}。`);
+        return;
+      }
+      case "status": {
+        // Two rows, never merged: "什么在跑" and "下一个跑什么" are different
+        // facts, and the old single row silently reported the deployment
+        // default as if it were the session's.
+        const defaultId = this.ops.defaultPresetId();
+        const defaultLabel = (await this.resolvePresetLabel(defaultId)) ?? "（未设置）";
+        const lines = [`🤖 新会话默认 Preset: ${defaultLabel}`];
+        const liveId = user.sessionId
+          ? await this.ops.resolveSessionPreset(user.sessionId, user.cwd)
+          : undefined;
+        if (liveId) {
           const liveLabel = (await this.resolvePresetLabel(liveId)) ?? liveId;
-          lines.push(`当前会话: ${liveLabel}`);
+          lines.push(`当前会话 Preset: ${liveLabel}`);
+        } else if (!user.sessionId) {
+          lines.push("当前会话 Preset: （未绑定）");
         }
+        lines.push("切换会话: /preset switch <名称|编号>；改新会话默认: /preset default <名称|编号>");
         await this.sendReply(userId, lines.join("\n"));
         return;
       }
@@ -6947,11 +7043,15 @@ export class WeChatDSHBridge {
   }
 
   /**
-   * `/status` preset rows: deployment default (settings document) and
+   * `/status` preset rows: the new-session default (settings document) and
    * the bound session's live preset (event-aware). Shown as two lines
-   * so a switched session is not mistaken for the global default.
+   * so a switched session is not mistaken for the deployment default.
    * The default row sits after permission; the session row stays with
    * the session/agent block.
+   *
+   * "新会话默认" rather than bare "默认" because `/preset switch` is
+   * session-scoped: a user reading `/status` must be able to tell which of the
+   * two rows a `/preset` command would change.
    */
   private async formatStatusPresetLines(user: UserState): Promise<{
     defaultLine: string;
@@ -6959,7 +7059,7 @@ export class WeChatDSHBridge {
   }> {
     const defaultId = this.ops.defaultPresetId();
     const defaultLabel = (await this.resolvePresetLabel(defaultId)) ?? "（未设置）";
-    const defaultLine = `• 默认 Preset: ${defaultLabel}`;
+    const defaultLine = `• 新会话默认 Preset: ${defaultLabel}`;
     if (!user.sessionId) {
       return { defaultLine, sessionLine: "• 当前会话 Preset: （未绑定）" };
     }

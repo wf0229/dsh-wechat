@@ -775,7 +775,10 @@ export type SessionCommand =
 
 export type PresetCommand =
   | { kind: "list" }
+  /** Switch the preset of the bound session (allowed only before its first turn). */
   | { kind: "switch"; target: string }
+  /** Read or write the deployment default preset (new sessions from now on). */
+  | { kind: "default"; target?: string }
   | { kind: "status" };
 
 export type ModelCommand =
@@ -930,18 +933,25 @@ export function parseSessionCommand(text: string): SessionCommand | null {
 
 /**
  * Parse `/preset` (alias `/p`; legacy aliases `/agent`, `/a` still parse):
- *   list | switch <name|n> | status
+ *   list | switch <名称|编号> | default [名称|编号] | status
  *
- * The preset default lives in the DSH settings document (`agent-presets`
- * namespace), the same one the GUI settings page edits — `/preset switch`
- * writes that document, so GUI and WeChat stay in sync.
+ * Two different facts, two different subcommands:
+ *
+ *   - `switch` is SESSION-scoped: it changes the preset the bound session runs,
+ *     through the host's own `agentPresets.select`. DSH only allows that before
+ *     the session's first turn, which is why a started session is refused
+ *     rather than silently switched for "later".
+ *   - `default` is DEPLOYMENT-scoped: it writes the DSH settings document
+ *     (`agent-preset-registry.selectedDefault`, legacy `agent-presets.default`)
+ *     — the same default the GUI settings page edits, so both sides stay in
+ *     sync and every NEW session picks it up.
  */
 export function parsePresetCommand(text: string): PresetCommand | null {
   const trimmed = text.trim();
-  const m = trimmed.match(/^\/(?:preset|p|agent|a)(?:\s+(list|switch|status)(?:\s+(.*))?)?$/);
+  const m = trimmed.match(/^\/(?:preset|p|agent|a)(?:\s+(list|switch|status|default)(?:\s+(.*))?)?$/);
   if (!m) return null;
   if (!m[1]) return { kind: "status" };
-  const sub = m[1] as "list" | "switch" | "status";
+  const sub = m[1] as "list" | "switch" | "status" | "default";
   const rest = (m[2] ?? "").trim();
   switch (sub) {
     case "list":
@@ -950,6 +960,9 @@ export function parsePresetCommand(text: string): PresetCommand | null {
     case "switch":
       if (!rest) return null;
       return { kind: "switch", target: rest };
+    case "default":
+      // Bare `/preset default` reports the current default, like `/perm default`.
+      return { kind: "default", ...(rest ? { target: rest } : {}) };
   }
 }
 

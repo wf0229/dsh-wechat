@@ -189,12 +189,18 @@ describe("slash parsers", () => {
     expect(parsePresetCommand("/p status")).toEqual({ kind: "status" });
     expect(parsePresetCommand("/preset switch build")).toEqual({ kind: "switch", target: "build" });
     expect(parsePresetCommand("/p switch 2")).toEqual({ kind: "switch", target: "2" });
+    // `/preset default` is the DEPLOYMENT default (new sessions), bare form reads it.
+    expect(parsePresetCommand("/preset default")).toEqual({ kind: "default" });
+    expect(parsePresetCommand("/p default cordis")).toEqual({ kind: "default", target: "cordis" });
+    expect(parsePresetCommand("/p default 2")).toEqual({ kind: "default", target: "2" });
     // Legacy aliases still parse.
     expect(parsePresetCommand("/agent list")).toEqual({ kind: "list" });
     expect(parsePresetCommand("/a switch build")).toEqual({ kind: "switch", target: "build" });
     // Bare `/p` reports status instead of "未知命令 /p".
     expect(parsePresetCommand("/preset")).toEqual({ kind: "status" });
     expect(parsePresetCommand("/p")).toEqual({ kind: "status" });
+    // `switch` still needs a target: a bare switch is a typo, not a status read.
+    expect(parsePresetCommand("/preset switch")).toBeNull();
   });
 
   it("parseModelCommand", () => {

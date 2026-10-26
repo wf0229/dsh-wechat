@@ -1,8 +1,11 @@
 /**
  * Durable per-user bridge state: session mapping, silent mode, and workspace
- * choices. The default preset deliberately lives in the DSH settings
- * document (`agent-presets` namespace), not here — the GUI settings page and
- * WeChat's `/preset switch` share that one source of truth.
+ * choices. Presets deliberately live elsewhere: the bound session's preset is
+ * recorded in its own session log (`agent-preset/selected`), and the
+ * new-session default lives in the DSH settings document
+ * (`agent-preset-registry.selectedDefault`) — the same one the GUI settings
+ * page edits and `/preset default` writes. Nothing about a preset is a
+ * per-WeChat-user preference, so nothing about it belongs in this file.
  *
  * Mirrors the reference project's UserState (wechat-opencode) but keeps
  * ONLY what the DSH bridge needs. Persisted to `~/.dsh-wechat/state.json`

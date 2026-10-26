@@ -4,7 +4,7 @@
  * checks — no runtime imports of `@deepseek-ai/*` packages.
  */
 
-import type { Agent, AgentSession, AgentSessionLike, JobsService, SessionProjectionService } from "./types.js";
+import type { Agent, AgentSession, AgentSessionLike, JobsService, SessionProjectionService, TurnBoundaryState } from "./types.js";
 import { modelSelectionFromProjection, sessionEvents } from "./types.js";
 import type { BridgeContext } from "./sessions.js";
 
@@ -194,8 +194,23 @@ export interface LlmService {
 export interface AgentPresetsService {
   list(): Promise<AgentPreset[]>;
   recompose(agentCtx: unknown, id: string): Promise<unknown>;
-  /** Preset id mounted when a caller names none (dsh-agent-presets). */
+  /**
+   * Preset id mounted when a caller names none (dsh-agent-presets).
+   * This is the DEPLOYMENT default — the new-session default, not the bound
+   * session's preset.
+   */
   defaultId?: string;
+  /**
+   * The host's own preset switch for a not-yet-started session
+   * (`@deepseek-ai/dsh-agent-preset-registry` `select`): it rebinds the live
+   * Agent and appends the durable `agent-preset/selected` event, so the
+   * switch survives restarts and shows up in `/s list` + `/status`.
+   *
+   * It refuses a session that has already started (`agent-preset/locked`),
+   * which is exactly the constraint `/preset switch` now surfaces instead of
+   * silently writing a global default the user did not ask for.
+   */
+  select?(agent: Agent, agentPreset: string): Promise<string>;
 }
 
 export interface AgentDefaultModelService {
@@ -226,6 +241,21 @@ export type SessionModelSelectionOutcome =
   | { kind: "host" }
   /** The deployment composes no session controller (older Host / headless). */
   | { kind: "unsupported" }
+  | { kind: "error"; message: string };
+
+/**
+ * Outcome of switching one session's agent preset (`/preset switch`).
+ *
+ * `locked` is the interesting failure: DSH refuses to change a preset once the
+ * session has started a turn, and the bridge reports that as "start a new
+ * session first" rather than papering over it with a global default write.
+ */
+export type SessionPresetOutcome =
+  | { kind: "switched" }
+  /** Host exposes neither `select` nor `recompose` for presets. */
+  | { kind: "unsupported" }
+  /** The session already ran a turn — `agent-preset/locked`. */
+  | { kind: "locked" }
   | { kind: "error"; message: string };
 
 /** Minimal structural surface of the `permissionPresets` service (dsh-permission-presets). */
@@ -1113,6 +1143,65 @@ export class DshOps {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Whether a session is still "not started" — the one state in which DSH lets
+   * its agent preset change. Mirrors the host predicate exactly
+   * (`agent-presets.select` reads the `turnBoundary` projection and refuses
+   * when a turn is open or a turn has already completed), falling back to a log
+   * fold on hosts that predate the projection.
+   */
+  sessionStarted(session: AgentSessionLike | undefined): boolean {
+    if (!session) return false;
+    const projections = this.sessionProjections();
+    try {
+      const boundary = projections?.stateOf?.(session, "turnBoundary") as TurnBoundaryState | undefined;
+      if (boundary && typeof boundary === "object") {
+        return boundary.openTurnStartSeq != null || (boundary.lastTurn ?? 0) > 0;
+      }
+    } catch {
+      // fall through to the log fold
+    }
+    return sessionEvents(session as AgentSession).some(
+      (ev) =>
+        ev?.type === "turn/start" ||
+        ev?.type === "user/message" ||
+        ev?.type === "assistant/message",
+    );
+  }
+
+  /**
+   * Switch the preset of a session that has not started yet — the host's own
+   * `agentPresets.select`, which rebinds the live Agent AND appends the durable
+   * `agent-preset/selected` event (so the switch survives a resume and shows up
+   * in `/s list` / `/status`).
+   *
+   * This is deliberately NOT `saveDefaultPreset`: `/preset switch` is a
+   * session-scoped action, and writing the deployment default instead would
+   * change every future session of this DSH install on the strength of one
+   * chat message.
+   */
+  async selectSessionPreset(agent: Agent, presetId: string): Promise<SessionPresetOutcome> {
+    const presets = this.get<AgentPresetsService>("agentPresets");
+    if (!presets) return { kind: "unsupported" };
+    try {
+      if (typeof presets.select === "function") {
+        await presets.select(agent, presetId);
+        return { kind: "switched" };
+      }
+      // Host without `select`: rebind, then record the same durable event so a
+      // later resume mounts this preset and the display paths agree.
+      if (typeof presets.recompose !== "function") return { kind: "unsupported" };
+      await presets.recompose(agent.ctx, presetId);
+      agent.session?.append?.("agent-preset/selected", { agentPreset: presetId });
+      return { kind: "switched" };
+    } catch (err) {
+      if ((err as { code?: unknown } | undefined)?.code === "agent-preset/locked") {
+        return { kind: "locked" };
+      }
+      return { kind: "error", message: err instanceof Error ? err.message : String(err) };
     }
   }
 

@@ -371,7 +371,7 @@ describe("preset display — session list uses live preset (event-aware)", () =>
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
     // No sessionId binding → default row is the deployment default;
     // the session row says unbound rather than inventing a live value.
-    expect(text).toMatch(/• 默认 Preset:\s*标准模式/);
+    expect(text).toMatch(/• 新会话默认 Preset:\s*标准模式/);
     expect(text).toMatch(/• 当前会话 Preset:\s*（未绑定）/);
   });
 
@@ -414,11 +414,11 @@ describe("preset display — session list uses live preset (event-aware)", () =>
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
     expect(readTitle).not.toHaveBeenCalled();
     expect(text).toContain("状态会话");
-    expect(text).toMatch(/• 默认 Preset:\s*标准模式/);
+    expect(text).toMatch(/• 新会话默认 Preset:\s*标准模式/);
     expect(text).toMatch(/• 当前会话 Preset:\s*创造模式/);
     expect(text.indexOf("• 当前会话 Preset:")).toBeLessThan(text.indexOf("• 模型:"));
-    expect(text.indexOf("• 模型:")).toBeLessThan(text.indexOf("• 默认 Preset:"));
-    expect(text.indexOf("• 默认 Preset:")).toBeLessThan(text.indexOf("• 静默模式:"));
+    expect(text.indexOf("• 模型:")).toBeLessThan(text.indexOf("• 新会话默认 Preset:"));
+    expect(text.indexOf("• 新会话默认 Preset:")).toBeLessThan(text.indexOf("• 静默模式:"));
     expect(text).not.toMatch(/• 当前会话 Preset:\s*标准模式/);
     expect(text).not.toMatch(/Preset:\s*standard\b/);
     expect(text).not.toMatch(/Preset:\s*cordis\b/);
@@ -461,7 +461,7 @@ describe("preset display — session list uses live preset (event-aware)", () =>
       wechatTextMessage("/status"),
     );
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
-    expect(text).toMatch(/• 默认 Preset:\s*标准模式/);
+    expect(text).toMatch(/• 新会话默认 Preset:\s*标准模式/);
     expect(text).toMatch(/• 当前会话 Preset:\s*极简模式/);
     expect(text).not.toMatch(/• 当前会话 Preset:\s*创造模式/);
     expect(text).not.toMatch(/• 当前会话 Preset:\s*标准模式/);
@@ -499,9 +499,13 @@ describe("preset display — session list uses live preset (event-aware)", () =>
       wechatTextMessage("/preset status"),
     );
     const [, text] = sendTextMessage.mock.calls[0]! as [string, string];
-    expect(text).toMatch(/默认 Preset:\s*标准模式/);
-    expect(text).toMatch(/当前会话:\s*创造模式/);
+    // Two facts, two rows: `switch` is session-scoped and `default` is the
+    // new-session default, so status must not merge them into one line.
+    expect(text).toMatch(/新会话默认 Preset:\s*标准模式/);
+    expect(text).toMatch(/当前会话 Preset:\s*创造模式/);
     expect(text).not.toMatch(/^🤖 Preset:\s*创造模式/m);
     expect(text).not.toMatch(/Agent:/);
+    expect(text).toContain("/preset switch");
+    expect(text).toContain("/preset default");
   });
 });

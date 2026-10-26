@@ -95,6 +95,12 @@ export interface AgentSession {
         config?: { provider?: string; model?: string; reasoningEffort?: string };
       }
     | undefined;
+  /**
+   * Append one durable event to the live log (host `Session.append`). Used to
+   * record `agent-preset/selected` on hosts whose preset service has no
+   * `select` yet, so the switch still survives a resume.
+   */
+  append?(type: string, data: unknown): void;
 }
 
 /**
@@ -122,6 +128,12 @@ export interface Agent {
   readonly options: { provider?: string; model?: string };
   /** Session header access: the latest logged request config (dsh-session). */
   session?: AgentSession;
+  /**
+   * The Agent's scoped Cordis context. Preset operations (`mount`,
+   * `recompose`, `serviceFor`) are addressed to it — the host's
+   * `agentPresets.recompose(ctx, id)` takes exactly this.
+   */
+  ctx?: unknown;
   followup(message: UserMessage): void;
   steer(message: UserMessage): void;
   /**
@@ -254,12 +266,31 @@ export interface ProjectionSnapshotSurface {
 }
 
 /**
- * Structural surface of `ctx.sessionProjections`. Mirrors only
- * `snapshot`, which is what `/status` needs; `checkpoint` / `restore` /
- * `onChanged` are not consumed.
+ * Structural surface of `ctx.sessionProjections`.
+ *
+ * `snapshot` is what `/status` needs (the whole values map). `stateOf` is the
+ * single-key read the host itself uses for one projection value — the preset
+ * switch needs `turnBoundary` to answer "has this session started?", which is
+ * the exact predicate the host's own `agentPresets.select` enforces. Both are
+ * optional-shaped (declared, not required) so an older host without
+ * `stateOf` degrades to the event-fold heuristic instead of throwing.
  */
 export interface SessionProjectionService {
   snapshot(session: AgentSessionLike): ProjectionSnapshotSurface;
+  /** Host `stateOf(session, key)` — one projection value, or undefined. */
+  stateOf?(session: AgentSessionLike, key: string): unknown;
+}
+
+/**
+ * Host `turnBoundary` projection state (`@deepseek-ai/dsh-agent` loop).
+ *
+ * `openTurnStartSeq !== null` means a turn is running; `lastTurn > 0` means at
+ * least one turn has completed. Both cases make a session "already started",
+ * which is exactly what locks its agent preset.
+ */
+export interface TurnBoundaryState {
+  readonly openTurnStartSeq?: number | null;
+  readonly lastTurn?: number;
 }
 
 /**

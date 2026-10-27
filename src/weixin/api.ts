@@ -204,7 +204,12 @@ async function apiGet<T>(baseUrl: string, path: string, token?: string): Promise
 function describeNetworkError(err: unknown, url: string): Error {
   const cause = err instanceof Error && err.cause instanceof Error ? `: ${err.cause.message}` : "";
   const host = (() => { try { return new URL(url).host; } catch { return url; } })();
-  return new Error(`无法连接 ${host}${cause}（请检查网络/代理）`, { cause: err });
+  // Seen in the field: USTC campus network with IPv6 open but off-campus IPv4
+  // not enabled in 网络通 — ilinkai.weixin.qq.com is IPv4-only, so it times out.
+  return new Error(
+    `无法连接微信服务器 ${host}${cause}。如在校园网，请到网络通（wlt.ustc.edu.cn）开通对外访问；或检查代理、VPN、防火墙。`,
+    { cause: err },
+  );
 }
 
 function sleep(ms: number): Promise<void> {

@@ -27,7 +27,7 @@ describe("apiGet network retry", () => {
     const cause = new Error("getaddrinfo ENOTFOUND gw.example");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(Object.assign(new TypeError("fetch failed"), { cause })));
     const pending = getQrcodeStatus({ baseUrl: "https://gw.example", qrcode: "q" });
-    const settled = expect(pending).rejects.toThrow(/无法连接 gw\.example: getaddrinfo ENOTFOUND/);
+    const settled = expect(pending).rejects.toThrow(/无法连接微信服务器 gw\.example: getaddrinfo ENOTFOUND.*网络通/);
     await vi.runAllTimersAsync();
     await settled;
   });

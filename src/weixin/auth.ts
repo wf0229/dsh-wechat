@@ -68,9 +68,20 @@ export async function login(params: {
   const deadline = Date.now() + 5 * 60_000;
   let currentQrcode = qrResp.qrcode;
   let refreshCount = 0;
+  let pollFailures = 0;
 
   while (Date.now() < deadline) {
-    const statusResp = await getQrcodeStatus({ baseUrl, qrcode: currentQrcode });
+    let statusResp: Awaited<ReturnType<typeof getQrcodeStatus>>;
+    try {
+      statusResp = await getQrcodeStatus({ baseUrl, qrcode: currentQrcode });
+      pollFailures = 0;
+    } catch (err) {
+      // Keep polling through transient network loss until the deadline.
+      if (++pollFailures > 10) throw err;
+      log(`QR status poll failed (${pollFailures}/10): ${String(err)}`);
+      await new Promise((r) => setTimeout(r, 3000));
+      continue;
+    }
 
     switch (statusResp.status) {
       case "wait":

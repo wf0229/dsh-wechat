@@ -180,10 +180,31 @@ function buildBaseInfo(): BaseInfo {
 
 async function apiGet<T>(baseUrl: string, path: string, token?: string): Promise<T> {
   const url = `${baseUrl.replace(/\/$/, "")}/${path}`;
-  const res = await fetch(url, { headers: buildHeaders({ token }) });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
-  return JSON.parse(text) as T;
+  // Network-level failures ("TypeError: fetch failed") are retried; HTTP
+  // errors are not. Without this a single blip during QR polling killed login.
+  // 40s timeout leaves room for get_qrcode_status long-polling.
+  const maxAttempts = 3;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, { headers: buildHeaders({ token }), signal: AbortSignal.timeout(40_000) });
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts - 1) await sleep(1000 * 2 ** attempt);
+      continue;
+    }
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+    return JSON.parse(text) as T;
+  }
+  throw describeNetworkError(lastError, url);
+}
+
+function describeNetworkError(err: unknown, url: string): Error {
+  const cause = err instanceof Error && err.cause instanceof Error ? `: ${err.cause.message}` : "";
+  const host = (() => { try { return new URL(url).host; } catch { return url; } })();
+  return new Error(`无法连接 ${host}${cause}（请检查网络/代理）`, { cause: err });
 }
 
 function sleep(ms: number): Promise<void> {

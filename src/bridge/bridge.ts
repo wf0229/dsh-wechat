@@ -6170,8 +6170,12 @@ export class WeChatDSHBridge {
   private async relativeRefPath(cwd: string, absolute: string): Promise<string> {
     const canonical = await this.canonicalizePaths([cwd]);
     const root = canonical.get(cwd) ?? path.resolve(cwd);
-    if (!isPathInside(root, absolute)) return absolute.split(path.sep).join("/");
-    const rel = path.relative(root, absolute);
+    // Canonicalize the target's parent too, so both sides agree when the cwd
+    // sits behind a symlink (macOS /var → /private/var). The basename is kept
+    // as-is: a symlinked file inside the workspace still counts as inside.
+    const target = path.join(await canonicalPath(path.dirname(absolute)), path.basename(absolute));
+    if (!isPathInside(root, target)) return absolute.split(path.sep).join("/");
+    const rel = path.relative(root, target);
     return rel === "" ? "." : rel.split(path.sep).join("/");
   }
 
